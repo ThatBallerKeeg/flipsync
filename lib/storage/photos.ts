@@ -1,17 +1,20 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
-
 const BUCKET = 'listing-photos'
+
+function getClient() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 export async function uploadPhoto(
   buffer: Buffer,
   filename: string,
   contentType: string
 ): Promise<string> {
+  const supabase = getClient()
   const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
 
   // Ensure bucket exists (no-op if already created)
@@ -28,6 +31,7 @@ export async function uploadPhoto(
 }
 
 export async function deletePhoto(url: string): Promise<void> {
+  const supabase = getClient()
   const marker = `/storage/v1/object/public/${BUCKET}/`
   const parts = url.split(marker)
   if (parts.length < 2) return
