@@ -94,10 +94,25 @@ export async function POST() {
         const listingStatus =
           depopStatus === 'S' ? 'ACTIVE' : 'SOLD'
 
-        // Use Depop's date_updated (or date_created) as the listing date
-        // so auto-relist knows how old each listing actually is
+        // Use Depop's date fields to determine when item was actually listed.
+        // Depop API returns various date fields — try all known ones.
+        // Log first product's keys so we can see what's available.
+        if (synced === 0) {
+          console.log('[Depop sync] Sample product keys:', Object.keys(product))
+          console.log('[Depop sync] Date fields:', {
+            date_updated: product.date_updated,
+            date_created: product.date_created,
+            pub_date: product.pub_date,
+            updated_at: product.updated_at,
+            created_at: product.created_at,
+            dateUpdated: product.dateUpdated,
+            dateCreated: product.dateCreated,
+          })
+        }
+
         const depopDate = product.date_updated ?? product.date_created ?? product.pub_date
-        const listedAt = depopDate ? new Date(String(depopDate)) : new Date()
+          ?? product.updated_at ?? product.created_at ?? product.dateUpdated ?? product.dateCreated
+        const listedAt = depopDate ? new Date(String(depopDate)) : null
 
         if (existing) {
           await prisma.listing.update({
@@ -110,8 +125,8 @@ export async function POST() {
               platformUrl,
               platformStatus: depopStatus,
               syncedAt: new Date(),
-              // Only set listedAt if it wasn't already set (preserve relist timestamps)
-              ...(!existing.listedAt && { listedAt }),
+              // Always update listedAt from Depop's date if available
+              ...(listedAt && { listedAt }),
             },
           })
         } else {
@@ -119,7 +134,7 @@ export async function POST() {
             data: { title, description, depopDescription: description, price, photos, tags: [], status: listingStatus, ...(size && { size }) },
           })
           await prisma.listingPlatform.create({
-            data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt },
+            data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt: listedAt ?? new Date() },
           })
         }
         synced++
