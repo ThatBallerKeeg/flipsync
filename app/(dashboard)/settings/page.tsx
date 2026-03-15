@@ -1,9 +1,7 @@
 'use client'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'next/navigation'
-
-export const dynamic = 'force-dynamic'
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,8 +13,23 @@ import { useToast } from '@/hooks/useToast'
 import { ConnectedAccount } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 
-export default function SettingsPage() {
+// Reads search params and fires toast — must be inside <Suspense>
+function SearchParamsHandler({ toast }: { toast: ReturnType<typeof useToast>['toast'] }) {
   const searchParams = useSearchParams()
+  useEffect(() => {
+    const connected = searchParams.get('connected')
+    const error = searchParams.get('error')
+    if (connected) {
+      toast({ title: `${connected.charAt(0).toUpperCase() + connected.slice(1)} connected!`, description: 'Your account has been linked successfully.' })
+    }
+    if (error) {
+      toast({ title: 'Connection failed', description: `Could not connect: ${error}`, variant: 'destructive' })
+    }
+  }, [searchParams, toast])
+  return null
+}
+
+export default function SettingsPage() {
   const { toast } = useToast()
   const qc = useQueryClient()
 
@@ -31,22 +44,14 @@ export default function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['connected-accounts'] }),
   })
 
-  useEffect(() => {
-    const connected = searchParams.get('connected')
-    const error = searchParams.get('error')
-    if (connected) {
-      toast({ title: `${connected.charAt(0).toUpperCase() + connected.slice(1)} connected!`, description: 'Your account has been linked successfully.' })
-    }
-    if (error) {
-      toast({ title: 'Connection failed', description: `Could not connect: ${error}`, variant: 'destructive' })
-    }
-  }, [searchParams, toast])
-
   const ebayAccount = accounts.find((a) => a.platform === 'EBAY')
   const depopAccount = accounts.find((a) => a.platform === 'DEPOP')
 
   return (
     <div className="max-w-2xl space-y-6">
+      <Suspense fallback={null}>
+        <SearchParamsHandler toast={toast} />
+      </Suspense>
       <div>
         <h2 className="text-2xl font-bold">Settings</h2>
         <p className="text-muted-foreground mt-1">Manage your platform connections and preferences.</p>
