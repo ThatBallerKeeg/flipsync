@@ -2,6 +2,8 @@
 import { useSearchParams } from 'next/navigation'
 import { ListingForm } from '@/components/listing/ListingForm'
 
+export const dynamic = 'force-dynamic'
+
 export default function NewListingPage() {
   const searchParams = useSearchParams()
   const prefill = searchParams.get('prefill')
