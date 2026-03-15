@@ -153,22 +153,47 @@ function AutoPublishSettings() {
     queryFn: () => fetch('/api/settings').then((r) => r.json()),
   })
 
-  const currentValue = settings?.autoPublishPerDay ?? '0'
-  const [value, setValue] = useState<string | null>(null)
-  const displayValue = value ?? currentValue
+  // Auto-publish state
+  const currentPublish = settings?.autoPublishPerDay ?? '0'
+  const [publishValue, setPublishValue] = useState<string | null>(null)
+  const displayPublish = publishValue ?? currentPublish
+
+  // Auto-relist state
+  const currentRelistDays = settings?.autoRelistAfterDays ?? '0'
+  const currentRelistPerDay = settings?.autoRelistPerDay ?? '0'
+  const [relistDays, setRelistDays] = useState<string | null>(null)
+  const [relistPerDay, setRelistPerDay] = useState<string | null>(null)
+  const displayRelistDays = relistDays ?? currentRelistDays
+  const displayRelistPerDay = relistPerDay ?? currentRelistPerDay
+
+  const hasChanges =
+    displayPublish !== currentPublish ||
+    displayRelistDays !== currentRelistDays ||
+    displayRelistPerDay !== currentRelistPerDay
 
   async function handleSave() {
-    if (displayValue === currentValue) return
+    if (!hasChanges) return
     setSaving(true)
     try {
-      await fetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: 'autoPublishPerDay', value: displayValue }),
-      })
+      const updates: { key: string; value: string }[] = []
+      if (displayPublish !== currentPublish) updates.push({ key: 'autoPublishPerDay', value: displayPublish })
+      if (displayRelistDays !== currentRelistDays) updates.push({ key: 'autoRelistAfterDays', value: displayRelistDays })
+      if (displayRelistPerDay !== currentRelistPerDay) updates.push({ key: 'autoRelistPerDay', value: displayRelistPerDay })
+
+      await Promise.all(
+        updates.map((u) =>
+          fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(u),
+          })
+        )
+      )
       qc.invalidateQueries({ queryKey: ['settings'] })
-      toast({ title: 'Saved', description: `Auto-publish set to ${displayValue} per day.` })
-      setValue(null)
+      toast({ title: 'Saved', description: 'Automation settings updated.' })
+      setPublishValue(null)
+      setRelistDays(null)
+      setRelistPerDay(null)
     } catch {
       toast({ title: 'Failed to save', variant: 'destructive' })
     } finally {
@@ -181,37 +206,83 @@ function AutoPublishSettings() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Clock className="h-5 w-5" />
-          Auto-Publish
+          Automation
         </CardTitle>
         <CardDescription>
-          Automatically publish your oldest draft listings to Depop each day. Set to 0 to disable.
+          Automatically publish drafts and relist stale listings on Depop.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-center gap-4">
-          <Label htmlFor="auto-publish-count" className="shrink-0">Drafts per day</Label>
-          <Select value={displayValue} onValueChange={(v) => setValue(v)}>
-            <SelectTrigger id="auto-publish-count" className="w-24">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map((n) => (
-                <SelectItem key={n} value={String(n)}>
-                  {n === 0 ? 'Off' : String(n)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {displayValue !== currentValue && (
-            <Button size="sm" onClick={handleSave} disabled={saving}>
-              {saving ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
-              Save
-            </Button>
-          )}
+      <CardContent className="space-y-6">
+        {/* Auto-publish */}
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium">Auto-Publish Drafts</h4>
+          <div className="flex items-center gap-4">
+            <Label htmlFor="auto-publish-count" className="shrink-0 text-sm text-muted-foreground">Drafts per day</Label>
+            <Select value={displayPublish} onValueChange={(v) => setPublishValue(v)}>
+              <SelectTrigger id="auto-publish-count" className="w-24">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map((n) => (
+                  <SelectItem key={n} value={String(n)}>
+                    {n === 0 ? 'Off' : String(n)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">Oldest drafts are published first.</p>
         </div>
-        <p className="text-xs text-muted-foreground">
-          The oldest drafts are published first. Publishing runs once daily via the cron job.
-        </p>
+
+        <Separator />
+
+        {/* Auto-relist */}
+        <div className="space-y-3">
+          <h4 className="text-sm font-medium">Auto-Relist</h4>
+          <p className="text-xs text-muted-foreground">
+            Automatically relist active listings after a set number of days to boost visibility.
+            Relisting deletes the old listing and creates an identical new one.
+          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="relist-after-days" className="shrink-0 text-sm text-muted-foreground">Relist after</Label>
+              <Select value={displayRelistDays} onValueChange={(v) => setRelistDays(v)}>
+                <SelectTrigger id="relist-after-days" className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0, 3, 5, 7, 10, 14, 21, 30].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n === 0 ? 'Off' : `${n} days`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="relist-per-day" className="shrink-0 text-sm text-muted-foreground">Max per day</Label>
+              <Select value={displayRelistPerDay} onValueChange={(v) => setRelistPerDay(v)}>
+                <SelectTrigger id="relist-per-day" className="w-24">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n === 0 ? 'Off' : String(n)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+
+        {hasChanges && (
+          <Button onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
+            {saving ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+            Save Settings
+          </Button>
+        )}
       </CardContent>
     </Card>
   )

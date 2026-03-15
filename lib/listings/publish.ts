@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db/client'
 import { createDepopListing } from '@/lib/depop/listings'
 import { createEbayListing } from '@/lib/ebay/listings'
+import { depopFetch } from '@/lib/depop/client'
 
 export type PublishResult = Record<
   string,
@@ -81,4 +82,54 @@ export async function publishListing(
   }
 
   return results
+}
+
+/**
+ * Relist a listing on Depop: delete the old one and create an identical new one.
+ * This bumps the listing to the top of search results.
+ */
+export async function relistListing(
+  listingId: string
+): Promise<{ success: boolean; newUrl?: string; error?: string }> {
+  const listing = await prisma.listing.findUnique({
+    where: { id: listingId },
+    include: { platforms: true },
+  })
+  if (!listing) throw new Error('Listing not found')
+
+  const depopPlatform = listing.platforms.find((p) => p.platform === 'DEPOP')
+  if (!depopPlatform?.platformListingId) {
+    throw new Error('Listing is not published on Depop')
+  }
+
+  // 1. Delete old listing from Depop
+  try {
+    await depopFetch(`/products/${depopPlatform.platformListingId}/`, {
+      method: 'DELETE',
+    })
+    console.log(`[Relist] Deleted old Depop listing: ${depopPlatform.platformListingId}`)
+  } catch (err) {
+    console.warn(`[Relist] Failed to delete old listing (may already be gone):`, err)
+    // Continue anyway — the old listing might have been manually deleted
+  }
+
+  // 2. Create new listing via Playwright
+  const result = await createDepopListing(
+    listing as Parameters<typeof createDepopListing>[0]
+  )
+
+  // 3. Update ListingPlatform with new IDs and fresh listedAt
+  await prisma.listingPlatform.update({
+    where: { id: depopPlatform.id },
+    data: {
+      platformListingId: result.listingId,
+      platformUrl: result.url,
+      platformStatus: 'active',
+      listedAt: new Date(),
+    },
+  })
+
+  console.log(`[Relist] New Depop listing created: ${result.url}`)
+
+  return { success: true, newUrl: result.url }
 }

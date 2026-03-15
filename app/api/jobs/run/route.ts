@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/client'
-import { publishListing } from '@/lib/listings/publish'
+import { publishListing, relistListing } from '@/lib/listings/publish'
 
 // Auto-publish can take a while with Playwright
 export const maxDuration = 300
@@ -89,6 +89,53 @@ export async function POST(req: NextRequest) {
         } else {
           enqueued.push(`autoPublish(already at daily limit: ${publishedToday}/${dailyLimit})`)
         }
+      }
+    }
+
+    // Auto-relist: relist ACTIVE listings older than X days
+    if (job === 'autoRelist' || job === 'all') {
+      const [afterDaysSetting, perDaySetting] = await Promise.all([
+        prisma.appSettings.findUnique({ where: { key: 'autoRelistAfterDays' } }),
+        prisma.appSettings.findUnique({ where: { key: 'autoRelistPerDay' } }),
+      ])
+      const afterDays = parseInt(afterDaysSetting?.value ?? '0', 10)
+      const perDay = parseInt(perDaySetting?.value ?? '0', 10)
+
+      if (afterDays > 0 && perDay > 0) {
+        const cutoff = new Date()
+        cutoff.setDate(cutoff.getDate() - afterDays)
+
+        // Find ACTIVE listings with Depop platform where listedAt is older than cutoff
+        const staleListings = await prisma.listingPlatform.findMany({
+          where: {
+            platform: 'DEPOP',
+            platformStatus: 'active',
+            listedAt: { lt: cutoff },
+            listing: { status: 'ACTIVE' },
+          },
+          include: { listing: true },
+          orderBy: { listedAt: 'asc' },
+          take: perDay,
+        })
+
+        const results: { id: string; success: boolean; error?: string }[] = []
+
+        for (const platformEntry of staleListings) {
+          try {
+            const result = await relistListing(platformEntry.listingId)
+            results.push({ id: platformEntry.listingId, success: result.success })
+          } catch (err) {
+            results.push({
+              id: platformEntry.listingId,
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+
+        const successCount = results.filter((r) => r.success).length
+        enqueued.push(`autoRelist(${successCount}/${staleListings.length})`)
+        console.log('[AutoRelist] Results:', JSON.stringify(results))
       }
     }
 
