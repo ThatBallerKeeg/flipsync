@@ -26,8 +26,9 @@ function scheduleNext() {
 }
 
 async function runJobs() {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL
-    || `http://localhost:${process.env.PORT || 3000}`
+  // Use localhost with the PORT Railway injects (8080 in production)
+  const port = process.env.PORT || 3000
+  const baseUrl = `http://localhost:${port}`
 
   try {
     console.log('[Scheduler] Running auto-publish + auto-relist jobs...')
@@ -55,10 +56,10 @@ export function startScheduler() {
 
   console.log('[Scheduler] Starting internal cron scheduler (runs every hour)')
 
-  // Run once on startup (after a 30s delay to let the server fully boot)
+  // Run once on startup (after 2 minutes to let the server fully boot)
   setTimeout(() => {
     runJobs()
-  }, 30000)
+  }, 120000)
 
   // Then schedule hourly runs
   scheduleNext()

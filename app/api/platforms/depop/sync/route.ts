@@ -94,24 +94,9 @@ export async function POST() {
         const listingStatus =
           depopStatus === 'S' ? 'ACTIVE' : 'SOLD'
 
-        // Use Depop's date fields to determine when item was actually listed.
-        // Depop API returns various date fields — try all known ones.
-        // Log first product's keys so we can see what's available.
-        if (synced === 0) {
-          console.log('[Depop sync] Sample product keys:', Object.keys(product))
-          console.log('[Depop sync] Date fields:', {
-            date_updated: product.date_updated,
-            date_created: product.date_created,
-            pub_date: product.pub_date,
-            updated_at: product.updated_at,
-            created_at: product.created_at,
-            dateUpdated: product.dateUpdated,
-            dateCreated: product.dateCreated,
-          })
-        }
-
-        const depopDate = product.date_updated ?? product.date_created ?? product.pub_date
-          ?? product.updated_at ?? product.created_at ?? product.dateUpdated ?? product.dateCreated
+        // Depop API fields: created_date = original creation, pub_date = last publish.
+        // Use created_date for listing age (when it was first posted).
+        const depopDate = product.created_date ?? product.pub_date
         const listedAt = depopDate ? new Date(String(depopDate)) : null
 
         if (existing) {
