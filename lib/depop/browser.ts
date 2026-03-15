@@ -91,8 +91,10 @@ export async function createDepopListingBrowser(
 
   try {
     // Navigate to Depop sell form
+    // Use 'load' not 'networkidle' — Depop has continuous background requests
+    // that prevent networkidle from ever firing, causing a 30s timeout.
     await page.goto('https://www.depop.com/products/create/', {
-      waitUntil: 'networkidle',
+      waitUntil: 'load',
       timeout: 30000,
     })
 
@@ -153,7 +155,7 @@ export async function createDepopListingBrowser(
       for (let i = 0; i < localPaths.length; i++) {
         const resp = await page.waitForResponse(
           (r) => r.url().includes('depop.com') && r.url().includes('pictures'),
-          { timeout: 20000 }
+          { timeout: 12000 }
         ).catch(() => null)
         if (resp) {
           console.log(`[Depop] Photo ${i + 1} upload: ${resp.status()} ${resp.url()}`)
