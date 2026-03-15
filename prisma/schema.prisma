@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ConnectedAccount {
+  id             String    @id @default(cuid())
+  platform       Platform
+  accessToken    String    // encrypted
+  refreshToken   String?   // encrypted
+  expiresAt      DateTime?
+  platformUserId String?
+  shopUsername   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Listing {
+  id               String             @id @default(cuid())
+  title            String
+  description      String?
+  depopDescription String?
+  ebayDescription  String?
+  price            Float
+  originalPrice    Float?
+  category         String?
+  condition        String?            // new_with_tags, excellent, good, fair, poor
+  brand            String?
+  size             String?
+  color            String?
+  tags             String[]
+  photos           String[]           // Supabase Storage URLs
+  status           ListingStatus      @default(DRAFT)
+  platforms        ListingPlatform[]
+  analytics        ListingAnalytics[]
+  sale             Sale?
+  aiData           Json?              // raw AI identification output
+  comparables      Json?              // cached web search comps
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+}
+
+model ListingPlatform {
+  id                String    @id @default(cuid())
+  listing           Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  listingId         String
+  platform          Platform
+  platformListingId String?   // ID assigned by the platform
+  platformUrl       String?
+  platformStatus    String?
+  listedAt          DateTime?
+  syncedAt          DateTime?
+
+  @@unique([listingId, platform])
+}
+
+model ListingAnalytics {
+  id          String   @id @default(cuid())
+  listing     Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  listingId   String
+  platform    Platform
+  date        DateTime @db.Date
+  views       Int      @default(0)
+  likes       Int      @default(0)
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+
+  @@unique([listingId, platform, date])
+}
+
+model Sale {
+  id           String   @id @default(cuid())
+  listing      Listing  @relation(fields: [listingId], references: [id])
+  listingId    String   @unique
+  platform     Platform
+  salePrice    Float
+  platformFee  Float?
+  soldAt       DateTime
+  buyerInfo    Json?
+  shippingInfo Json?
+  createdAt    DateTime @default(now())
+}
+
+model PriceComparison {
+  id        String   @id @default(cuid())
+  queryHash String   @unique
+  query     String
+  results   Json
+  fetchedAt DateTime @default(now())
+
+  @@index([queryHash])
+}
+
+model Valuation {
+  id           String   @id @default(cuid())
+  itemQuery    String
+  photoUrl     String?
+  platformData Json     // raw comps per platform
+  aiSummary    Json     // Claude's synthesized output
+  priceLow     Float
+  priceMid     Float
+  priceHigh    Float
+  confidence   Float    // 0-1
+  createdAt    DateTime @default(now())
+}
+
+enum Platform {
+  DEPOP
+  EBAY
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  SOLD
+  ENDED
+  RELISTED
+}
