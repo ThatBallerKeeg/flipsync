@@ -113,6 +113,11 @@ enum Platform {
   EBAY
 }
 
+model AppSettings {
+  key   String @id
+  value String
+}
+
 enum ListingStatus {
   DRAFT
   ACTIVE

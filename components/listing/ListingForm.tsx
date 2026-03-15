@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Checkbox } from '@/components/ui/checkbox'
+
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -16,7 +16,7 @@ import { AIAssistPanel } from './AIAssistPanel'
 import { DescriptionEditor } from './DescriptionEditor'
 import { AIIdentifyResult, ComparableListing, Listing, PriceSuggestion } from '@/types'
 import { useToast } from '@/hooks/useToast'
-import { Loader2, Save, Zap, ChevronRight, ChevronLeft } from 'lucide-react'
+import { Loader2, Save, ChevronRight, ChevronLeft } from 'lucide-react'
 import { cn, formatCurrency } from '@/lib/utils'
 
 const schema = z.object({
@@ -34,15 +34,14 @@ const schema = z.object({
 
 type FormData = z.infer<typeof schema>
 
-const STEPS = ['Photos', 'AI Assist', 'Description', 'Review & Publish'] as const
+const STEPS = ['Photos', 'AI Assist', 'Description', 'Review & Save'] as const
 
 interface Props {
   initialData?: Partial<Listing>
   onSave?: (data: Partial<Listing>) => Promise<unknown>
-  onPublish?: (platforms: ('DEPOP')[]) => Promise<void>
 }
 
-export function ListingForm({ initialData, onSave, onPublish }: Props) {
+export function ListingForm({ initialData, onSave }: Props) {
   const router = useRouter()
   const { toast } = useToast()
   const [step, setStep] = useState(initialData ? 3 : 0)
@@ -51,9 +50,7 @@ export function ListingForm({ initialData, onSave, onPublish }: Props) {
   const [comparables, setComparables] = useState<ComparableListing[]>([])
   const [priceSuggestion, setPriceSuggestion] = useState<PriceSuggestion | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
-  const [publishToDepop, setPublishToDepop] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [publishing, setPublishing] = useState(false)
   const [listingId, setListingId] = useState<string | null>(initialData?.id ?? null)
 
   const { register, handleSubmit, setValue, watch, getValues, formState: { errors } } = useForm<FormData>({
@@ -159,56 +156,6 @@ export function ListingForm({ initialData, onSave, onPublish }: Props) {
       }
     } finally {
       setSaving(false)
-    }
-  }
-
-  const publishNow = async () => {
-    const platforms: 'DEPOP'[] = publishToDepop ? ['DEPOP'] : []
-    if (!platforms.length) {
-      toast({ title: 'Select a platform', variant: 'destructive' })
-      return
-    }
-
-    setPublishing(true)
-    try {
-      let id = listingId
-      if (!id) {
-        const data = buildListingData()
-        const res = await fetch('/api/listings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...data, photos, status: 'DRAFT', aiData: identified, comparables }),
-        })
-        const listing = await res.json()
-        id = listing.id
-        setListingId(id)
-      }
-
-      if (onPublish) {
-        await onPublish(platforms)
-      } else {
-        const res = await fetch(`/api/listings/${id}/publish`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ platforms }),
-        })
-        const result = await res.json()
-        if (!res.ok || !result.results) {
-          toast({ title: 'Publish failed', description: result.error ?? 'Unknown error', variant: 'destructive' })
-          return
-        }
-        const successes = Object.entries(result.results).filter(([, r]) => (r as { success: boolean }).success)
-        if (successes.length) {
-          toast({ title: `Published to Depop!`, description: 'Your listing is now live.' })
-        } else {
-          const errs = Object.values(result.results).map((r: any) => r.error).join(', ')
-          toast({ title: 'Publish failed', description: errs, variant: 'destructive' })
-        }
-      }
-
-      router.push('/listings')
-    } finally {
-      setPublishing(false)
     }
   }
 
@@ -384,30 +331,16 @@ export function ListingForm({ initialData, onSave, onPublish }: Props) {
           </Card>
 
           <Card>
-            <CardHeader><CardTitle>Publish</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Save Listing</CardTitle></CardHeader>
             <CardContent className="space-y-6">
-              <div className="flex items-center gap-3 rounded-md border p-3">
-                <Checkbox
-                  id="pub-depop"
-                  checked={publishToDepop}
-                  onCheckedChange={(c) => setPublishToDepop(!!c)}
-                />
-                <label htmlFor="pub-depop" className="flex items-center gap-2 cursor-pointer">
-                  <span className="rounded bg-[#FF2300] px-2 py-0.5 text-xs font-bold text-white">Depop</span>
-                  <span className="text-sm">Publish to Depop</span>
-                </label>
-              </div>
+              <p className="text-sm text-muted-foreground">
+                Your listing will be saved as a draft. Drafts are automatically published to Depop based on your schedule in Settings.
+              </p>
 
-              <div className="flex flex-col gap-2 pt-2">
-                <Button variant="outline" onClick={saveAsDraft} disabled={saving}>
-                  {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                  Save as Draft
-                </Button>
-                <Button onClick={publishNow} disabled={publishing}>
-                  {publishing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Zap className="mr-2 h-4 w-4" />}
-                  Publish to Depop
-                </Button>
-              </div>
+              <Button className="w-full" onClick={saveAsDraft} disabled={saving}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                Save Listing
+              </Button>
 
               <Button variant="ghost" className="w-full" onClick={() => setStep(2)}>
                 <ChevronLeft className="mr-1 h-4 w-4" />Back to Description

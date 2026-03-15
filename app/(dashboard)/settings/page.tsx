@@ -8,7 +8,8 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
-import { CheckCircle, AlertCircle, ExternalLink, Loader2 } from 'lucide-react'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { CheckCircle, AlertCircle, ExternalLink, Loader2, Clock } from 'lucide-react'
 import { useToast } from '@/hooks/useToast'
 import { ConnectedAccount } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -80,6 +81,8 @@ export default function SettingsPage() {
           />
         </CardContent>
       </Card>
+
+      <AutoPublishSettings />
     </div>
   )
 }
@@ -135,6 +138,82 @@ function PlatformCard({
         )}
       </div>
     </div>
+  )
+}
+
+// ─── Auto-publish settings ───────────────────────────────────────────────────
+
+function AutoPublishSettings() {
+  const { toast } = useToast()
+  const qc = useQueryClient()
+  const [saving, setSaving] = useState(false)
+
+  const { data: settings } = useQuery<Record<string, string>>({
+    queryKey: ['settings'],
+    queryFn: () => fetch('/api/settings').then((r) => r.json()),
+  })
+
+  const currentValue = settings?.autoPublishPerDay ?? '0'
+  const [value, setValue] = useState<string | null>(null)
+  const displayValue = value ?? currentValue
+
+  async function handleSave() {
+    if (displayValue === currentValue) return
+    setSaving(true)
+    try {
+      await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'autoPublishPerDay', value: displayValue }),
+      })
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      toast({ title: 'Saved', description: `Auto-publish set to ${displayValue} per day.` })
+      setValue(null)
+    } catch {
+      toast({ title: 'Failed to save', variant: 'destructive' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Clock className="h-5 w-5" />
+          Auto-Publish
+        </CardTitle>
+        <CardDescription>
+          Automatically publish your oldest draft listings to Depop each day. Set to 0 to disable.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-4">
+          <Label htmlFor="auto-publish-count" className="shrink-0">Drafts per day</Label>
+          <Select value={displayValue} onValueChange={(v) => setValue(v)}>
+            <SelectTrigger id="auto-publish-count" className="w-24">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {n === 0 ? 'Off' : String(n)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {displayValue !== currentValue && (
+            <Button size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+              Save
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          The oldest drafts are published first. Publishing runs once daily via the cron job.
+        </p>
+      </CardContent>
+    </Card>
   )
 }
 

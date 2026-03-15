@@ -31,14 +31,6 @@ export default function EditListingPage() {
     <ListingForm
       initialData={listing}
       onSave={(data) => updateMutation.mutateAsync(data)}
-      onPublish={async (platforms) => {
-        await fetch(`/api/listings/${id}/publish`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ platforms }),
-        })
-        qc.invalidateQueries({ queryKey: ['listings'] })
-      }}
     />
   )
 }
