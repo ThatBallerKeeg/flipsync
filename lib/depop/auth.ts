@@ -41,7 +41,9 @@ export async function getValidDepopToken(): Promise<string | null> {
   try {
     return decryptToken(account.accessToken)
   } catch {
-    return null
+    // Decryption failed — token was encrypted with a different key.
+    // User needs to disconnect and reconnect to re-encrypt with the current key.
+    throw new Error('Depop token could not be decrypted — please disconnect and reconnect your Depop account in Settings.')
   }
 }
 
@@ -56,6 +58,6 @@ export async function getDepopAccount(): Promise<{ token: string; username: stri
     const token = decryptToken(account.accessToken)
     return { token, username: account.shopUsername }
   } catch {
-    return null
+    throw new Error('Depop token could not be decrypted — please disconnect and reconnect your Depop account in Settings.')
   }
 }
