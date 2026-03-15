@@ -1,22 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { AIIdentifyResult } from '@/types'
-import { readFile } from 'fs/promises'
-import { join } from 'path'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 async function toImageBlock(url: string): Promise<Anthropic.ImageBlockParam> {
-  if (url.startsWith('/uploads/')) {
-    const filename = url.slice('/uploads/'.length)
-    const filePath = join(process.cwd(), 'public', 'uploads', filename)
-    const data = await readFile(filePath)
-    const ext = filename.split('.').pop()?.toLowerCase() ?? 'jpg'
-    const mediaType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
-    return {
-      type: 'image',
-      source: { type: 'base64', media_type: mediaType as 'image/jpeg' | 'image/png' | 'image/webp', data: data.toString('base64') },
-    }
-  }
   return {
     type: 'image',
     source: { type: 'url', url },
