@@ -11,7 +11,7 @@ const FETCH_SCRIPT = path.join(process.cwd(), 'lib/depop/fetch.py')
 export async function depopFetch(
   apiPath: string,
   options: { method?: string; body?: unknown; v2?: boolean } = {}
-): Promise<{ status: number; json: () => unknown; text: () => string; ok: boolean }> {
+): Promise<{ status: number; json: () => any; text: () => string; ok: boolean }> {
   const token = await getValidDepopToken()
   if (!token) throw new Error('Depop not connected — please connect your account in Settings.')
 
