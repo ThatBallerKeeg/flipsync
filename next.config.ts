@@ -24,8 +24,6 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  // Enable instrumentation hook for the internal cron scheduler
-  instrumentationHook: true,
   experimental: {
     serverActions: {
       // Allow server actions from any origin (covers Railway + custom domains)

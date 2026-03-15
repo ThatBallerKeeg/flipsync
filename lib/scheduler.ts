@@ -6,12 +6,13 @@
  * Runs every hour on the hour. Each run checks:
  *   1. Auto-publish: publishes up to N draft listings per day
  *   2. Auto-relist: relists stale active listings older than X days
+ *
+ * Calls job functions directly (no HTTP) to avoid Docker networking issues.
  */
 
 let started = false
 
 function scheduleNext() {
-  // Calculate ms until the next full hour
   const now = new Date()
   const next = new Date(now)
   next.setHours(next.getHours() + 1, 0, 0, 0)
@@ -19,48 +20,109 @@ function scheduleNext() {
 
   setTimeout(async () => {
     await runJobs()
-    scheduleNext() // schedule the next tick
+    scheduleNext()
   }, delay)
 
   console.log(`[Scheduler] Next run at ${next.toISOString()} (in ${Math.round(delay / 60000)} min)`)
 }
 
 async function runJobs() {
-  // Use localhost with the PORT Railway injects (8080 in production)
-  const port = process.env.PORT || 3000
-  const baseUrl = `http://localhost:${port}`
-
   try {
     console.log('[Scheduler] Running auto-publish + auto-relist jobs...')
-    const res = await fetch(`${baseUrl}/api/jobs/run`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-cron-secret': process.env.CRON_SECRET || '__internal__',
-      },
-      body: JSON.stringify({ job: 'all' }),
-    })
-    const data = await res.json()
-    console.log('[Scheduler] Job results:', JSON.stringify(data))
+
+    // Import lazily to avoid circular deps at startup
+    const { prisma } = await import('@/lib/db/client')
+    const { publishListing, relistListing } = await import('@/lib/listings/publish')
+
+    const results: string[] = []
+
+    // ── Auto-publish: publish N oldest DRAFT listings per day ──
+    const publishSetting = await prisma.appSettings.findUnique({ where: { key: 'autoPublishPerDay' } })
+    const dailyPublishLimit = parseInt(publishSetting?.value ?? '0', 10)
+
+    if (dailyPublishLimit > 0) {
+      const todayStart = new Date()
+      todayStart.setHours(0, 0, 0, 0)
+
+      const publishedToday = await prisma.listingPlatform.count({
+        where: { listedAt: { gte: todayStart } },
+      })
+
+      const remaining = Math.max(0, dailyPublishLimit - publishedToday)
+
+      if (remaining > 0) {
+        const drafts = await prisma.listing.findMany({
+          where: { status: 'DRAFT' },
+          orderBy: { createdAt: 'asc' },
+          take: remaining,
+        })
+
+        let published = 0
+        for (const draft of drafts) {
+          try {
+            const result = await publishListing(draft.id, ['DEPOP'])
+            if (Object.values(result).some((r) => r.success)) published++
+          } catch (err) {
+            console.error(`[AutoPublish] Failed for ${draft.id}:`, err)
+          }
+        }
+        results.push(`autoPublish(${published}/${drafts.length})`)
+      } else {
+        results.push(`autoPublish(daily limit reached: ${publishedToday}/${dailyPublishLimit})`)
+      }
+    }
+
+    // ── Auto-relist: relist ACTIVE listings older than X days ──
+    const [afterDaysSetting, perDaySetting] = await Promise.all([
+      prisma.appSettings.findUnique({ where: { key: 'autoRelistAfterDays' } }),
+      prisma.appSettings.findUnique({ where: { key: 'autoRelistPerDay' } }),
+    ])
+    const afterDays = parseInt(afterDaysSetting?.value ?? '0', 10)
+    const perDay = parseInt(perDaySetting?.value ?? '0', 10)
+
+    if (afterDays > 0 && perDay > 0) {
+      const cutoff = new Date()
+      cutoff.setDate(cutoff.getDate() - afterDays)
+
+      const staleListings = await prisma.listingPlatform.findMany({
+        where: {
+          platform: 'DEPOP',
+          platformStatus: 'active',
+          listedAt: { lt: cutoff },
+          listing: { status: 'ACTIVE' },
+        },
+        include: { listing: true },
+        orderBy: { listedAt: 'asc' },
+        take: perDay,
+      })
+
+      let relisted = 0
+      for (const entry of staleListings) {
+        try {
+          const result = await relistListing(entry.listingId)
+          if (result.success) relisted++
+        } catch (err) {
+          console.error(`[AutoRelist] Failed for ${entry.listingId}:`, err)
+        }
+      }
+      results.push(`autoRelist(${relisted}/${staleListings.length})`)
+    }
+
+    console.log('[Scheduler] Done:', results.join(', ') || 'no jobs configured')
   } catch (err) {
     console.error('[Scheduler] Job run failed:', err)
   }
 }
 
-/**
- * Start the internal scheduler. Safe to call multiple times — only starts once.
- */
 export function startScheduler() {
   if (started) return
   started = true
 
   console.log('[Scheduler] Starting internal cron scheduler (runs every hour)')
 
-  // Run once on startup (after 2 minutes to let the server fully boot)
-  setTimeout(() => {
-    runJobs()
-  }, 120000)
+  // Run once 60s after startup
+  setTimeout(() => runJobs(), 60000)
 
-  // Then schedule hourly runs
+  // Then schedule hourly
   scheduleNext()
 }
