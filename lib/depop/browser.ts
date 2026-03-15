@@ -88,6 +88,7 @@ export async function createDepopListingBrowser(
   ])
 
   const page = await ctx.newPage()
+  const tempFiles: string[] = []
 
   try {
     // Navigate to Depop sell form
@@ -110,7 +111,6 @@ export async function createDepopListingBrowser(
     // ─── 1. Upload photos ─────────────────────────────────────────────────────
     const photoUrls = listing.photos.slice(0, 4)
     const localPaths: string[] = []
-    const tempFiles: string[] = []
 
     for (const imgUrl of photoUrls) {
       if (imgUrl.startsWith('/uploads/')) {
