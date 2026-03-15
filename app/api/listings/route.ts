@@ -27,7 +27,12 @@ export async function GET(req: NextRequest) {
   const platform = searchParams.get('platform') as 'DEPOP' | 'EBAY' | undefined
 
   const where: Record<string, unknown> = {}
-  if (status) where.status = status
+  if (status) {
+    where.status = status
+  } else {
+    // By default exclude SOLD items — they're shown on the Sales/Orders page
+    where.status = { not: 'SOLD' }
+  }
   if (platform) where.platforms = { some: { platform } }
 
   const listings = await prisma.listing.findMany({
