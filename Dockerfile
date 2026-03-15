@@ -24,6 +24,9 @@ RUN pnpm install --frozen-lockfile
 # App source
 COPY . .
 
+# Generate Prisma client (needs schema.prisma to be present)
+RUN npx prisma generate
+
 # Playwright: install Chromium
 RUN npx playwright install chromium
 
