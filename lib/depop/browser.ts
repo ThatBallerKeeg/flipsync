@@ -68,6 +68,9 @@ export async function createDepopListingBrowser(
   const token = await getValidDepopToken()
   if (!token) throw new Error('Depop not connected — please connect your account in Settings.')
 
+  // Track temp files for cleanup (must be declared before try/finally)
+  const tempFiles: string[] = []
+
   const b = await getBrowser()
   const ctx = await b.newContext({
     userAgent:
@@ -88,7 +91,6 @@ export async function createDepopListingBrowser(
   ])
 
   const page = await ctx.newPage()
-  const tempFiles: string[] = []
 
   try {
     // Navigate to Depop sell form
