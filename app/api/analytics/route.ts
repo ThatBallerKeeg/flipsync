@@ -11,12 +11,12 @@ export async function GET() {
   const sales = await prisma.sale.findMany({
     include: { listing: { select: { title: true, photos: true } } },
   })
-  const totalRevenue = sales.reduce((s, sale) => s + sale.salePrice, 0)
+  const totalRevenue = sales.reduce((s: number, sale) => s + sale.salePrice, 0)
 
   // Last 30 days
   const recentSales = sales.filter((s) => s.soldAt >= thirtyDaysAgo)
   const itemsSold30d = recentSales.length
-  const avgSalePrice30d = itemsSold30d ? recentSales.reduce((s, sale) => s + sale.salePrice, 0) / itemsSold30d : 0
+  const avgSalePrice30d = itemsSold30d ? recentSales.reduce((s: number, sale) => s + sale.salePrice, 0) / itemsSold30d : 0
 
   // Listing counts
   const [activeCount, soldCount, draftCount, totalCount] = await Promise.all([
@@ -104,12 +104,12 @@ export async function GET() {
       .map(([week, vals]) => ({ week, ...vals })),
     platformComparison: {
       ebay: {
-        avgPrice: ebaySales.length ? ebaySales.reduce((s, sale) => s + sale.salePrice, 0) / ebaySales.length : 0,
+        avgPrice: ebaySales.length ? ebaySales.reduce((s: number, sale) => s + sale.salePrice, 0) / ebaySales.length : 0,
         avgDaysToSell: 0,
         sellThrough: activeCount ? ebaySales.length / (activeCount + ebaySales.length) : 0,
       },
       depop: {
-        avgPrice: depopSales.length ? depopSales.reduce((s, sale) => s + sale.salePrice, 0) / depopSales.length : 0,
+        avgPrice: depopSales.length ? depopSales.reduce((s: number, sale) => s + sale.salePrice, 0) / depopSales.length : 0,
         avgDaysToSell: 0,
         sellThrough: activeCount ? depopSales.length / (activeCount + depopSales.length) : 0,
       },
