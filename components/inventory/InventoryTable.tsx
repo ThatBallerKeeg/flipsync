@@ -40,9 +40,15 @@ export function InventoryTable({ listings }: Props) {
     setSelected(next)
   }
 
+  // Use platform listedAt (actual Depop listing date), fall back to createdAt
+  const getListedDate = (l: Listing): Date => {
+    const platformDate = l.platforms?.[0]?.listedAt
+    return platformDate ? new Date(platformDate) : new Date(l.createdAt)
+  }
+
   const isAtRisk = (l: Listing) => {
     if (l.status !== 'ACTIVE') return false
-    const daysListed = (now.getTime() - new Date(l.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+    const daysListed = (now.getTime() - getListedDate(l).getTime()) / (1000 * 60 * 60 * 24)
     return daysListed >= 21
   }
 
@@ -112,7 +118,7 @@ export function InventoryTable({ listings }: Props) {
           <tbody className="divide-y">
             {filtered.map((listing) => {
               const atRisk = isAtRisk(listing)
-              const daysListed = Math.floor((now.getTime() - new Date(listing.createdAt).getTime()) / (1000 * 60 * 60 * 24))
+              const daysListed = Math.floor((now.getTime() - getListedDate(listing).getTime()) / (1000 * 60 * 60 * 24))
               return (
                 <tr key={listing.id} className="hover:bg-muted/30">
                   <td className="px-4 py-3">
