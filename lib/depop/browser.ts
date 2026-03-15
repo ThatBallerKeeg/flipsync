@@ -18,6 +18,9 @@ import { getValidDepopToken } from './auth'
 import type { Listing } from '@/types'
 import path from 'path'
 import fs from 'fs'
+import https from 'https'
+import http from 'http'
+import os from 'os'
 
 let browser: Browser | null = null
 
@@ -105,10 +108,31 @@ export async function createDepopListingBrowser(
     // ─── 1. Upload photos ─────────────────────────────────────────────────────
     const photoUrls = listing.photos.slice(0, 4)
     const localPaths: string[] = []
+    const tempFiles: string[] = []
+
     for (const imgUrl of photoUrls) {
       if (imgUrl.startsWith('/uploads/')) {
+        // Legacy local path
         const localPath = path.join(process.cwd(), 'public', imgUrl)
         if (fs.existsSync(localPath)) localPaths.push(localPath)
+      } else if (imgUrl.startsWith('http://') || imgUrl.startsWith('https://')) {
+        // Download remote URL (Supabase) to a temp file
+        try {
+          const ext = imgUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
+          const tmpPath = path.join(os.tmpdir(), `depop-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
+          await new Promise<void>((resolve, reject) => {
+            const file = fs.createWriteStream(tmpPath)
+            const client = imgUrl.startsWith('https://') ? https : http
+            client.get(imgUrl, (res) => {
+              res.pipe(file)
+              file.on('finish', () => { file.close(); resolve() })
+            }).on('error', reject)
+          })
+          localPaths.push(tmpPath)
+          tempFiles.push(tmpPath)
+        } catch (e) {
+          console.warn('[Depop] Failed to download photo:', imgUrl, e)
+        }
       }
     }
 
@@ -504,5 +528,9 @@ export async function createDepopListingBrowser(
     }
   } finally {
     await ctx.close()
+    // Clean up temp files
+    for (const f of tempFiles) {
+      fs.unlink(f, () => {})
+    }
   }
 }

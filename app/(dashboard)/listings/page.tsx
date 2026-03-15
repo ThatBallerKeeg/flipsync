@@ -30,10 +30,11 @@ export default function ListingsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
 
-  const { data: listings = [], isLoading } = useQuery<Listing[]>({
+  const { data: allListings = [], isLoading } = useQuery<Listing[]>({
     queryKey: ['listings'],
     queryFn: () => fetch('/api/listings').then((r) => r.json()),
   })
+  const listings = allListings.filter((l) => l.status !== 'SOLD')
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) =>
