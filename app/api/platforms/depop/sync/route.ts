@@ -94,6 +94,11 @@ export async function POST() {
         const listingStatus =
           depopStatus === 'S' ? 'ACTIVE' : 'SOLD'
 
+        // Use Depop's date_updated (or date_created) as the listing date
+        // so auto-relist knows how old each listing actually is
+        const depopDate = product.date_updated ?? product.date_created ?? product.pub_date
+        const listedAt = depopDate ? new Date(String(depopDate)) : new Date()
+
         if (existing) {
           await prisma.listing.update({
             where: { id: existing.listingId },
@@ -101,14 +106,20 @@ export async function POST() {
           })
           await prisma.listingPlatform.update({
             where: { id: existing.id },
-            data: { platformUrl, platformStatus: depopStatus, syncedAt: new Date() },
+            data: {
+              platformUrl,
+              platformStatus: depopStatus,
+              syncedAt: new Date(),
+              // Only set listedAt if it wasn't already set (preserve relist timestamps)
+              ...(!existing.listedAt && { listedAt }),
+            },
           })
         } else {
           const listing = await prisma.listing.create({
             data: { title, description, depopDescription: description, price, photos, tags: [], status: listingStatus, ...(size && { size }) },
           })
           await prisma.listingPlatform.create({
-            data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date() },
+            data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt },
           })
         }
         synced++
