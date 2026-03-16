@@ -418,19 +418,56 @@ export async function createDepopListingBrowser(
     // ─── 5b. If no size was provided but the form shows a Size field, pick first option
     if (!listing.size) {
       try {
-        const sizeInput = page.getByLabel('Size').first()
-        if (await sizeInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-          console.log('[Depop] Size field visible but no size set — picking first option')
-          await sizeInput.click({ timeout: 3000 })
+        // Dismiss any open dropdowns first by pressing Escape
+        await page.keyboard.press('Escape')
+        await page.waitForTimeout(300)
+
+        // Look for a size combobox specifically (not condition, not brand)
+        const sizeSelected = await page.evaluate(() => {
+          // Find all inputs/comboboxes on the page
+          const labels = Array.from(document.querySelectorAll('label'))
+          for (const label of labels) {
+            const labelText = label.textContent?.trim() ?? ''
+            // Must match "Size" specifically, not "Package size"
+            if (/^Size$/i.test(labelText) || labelText === 'Size') {
+              // Find the input associated with this label
+              const forId = label.getAttribute('for')
+              const input = forId ? document.getElementById(forId) : label.querySelector('input')
+              if (input) {
+                (input as HTMLInputElement).click()
+                return 'opened'
+              }
+            }
+          }
+          return null
+        })
+
+        if (sizeSelected) {
           await page.waitForTimeout(800)
-          // Use evaluate to click directly (avoids visibility timeout issues)
-          const selectedSize = await page.evaluate(() => {
+          // Now pick the first option that looks like a clothing size
+          const picked = await page.evaluate(() => {
             const options = Array.from(document.querySelectorAll('[role="option"]'))
-            if (options.length > 0) { (options[0] as HTMLElement).click(); return (options[0] as HTMLElement).innerText?.trim() }
+            const sizePattern = /^(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|One Size|US \d|UK \d|\d{1,2})/i
+            // Try to find a size-like option first
+            for (const o of options) {
+              const text = (o as HTMLElement).innerText?.trim() ?? ''
+              if (sizePattern.test(text)) {
+                (o as HTMLElement).click()
+                return text
+              }
+            }
+            // Fall back to first option if it doesn't look like a condition
+            if (options.length > 0) {
+              const text = (options[0] as HTMLElement).innerText?.trim() ?? ''
+              if (!/new|like new|good|fair|poor|tags/i.test(text)) {
+                (options[0] as HTMLElement).click()
+                return text
+              }
+            }
             return null
           })
-          if (selectedSize) {
-            console.log('[Depop] Size auto-selected:', selectedSize)
+          if (picked) {
+            console.log('[Depop] Size auto-selected:', picked)
           }
           await page.waitForTimeout(300)
         }
@@ -481,9 +518,15 @@ export async function createDepopListingBrowser(
           // Use evaluate to find and click the option directly in the DOM
           const selectedPkg = await page.evaluate(() => {
             const options = Array.from(document.querySelectorAll('[role="option"]'))
-            // Try "Small" first
-            const small = options.find((o) => /small/i.test((o as HTMLElement).innerText ?? ''))
+            // Try exact "Small" first (not "Extra extra small")
+            const small = options.find((o) => {
+              const text = (o as HTMLElement).innerText?.trim() ?? ''
+              return /^small\b/i.test(text)
+            })
             if (small) { (small as HTMLElement).click(); return (small as HTMLElement).innerText?.trim() }
+            // Try "Medium" as second choice
+            const medium = options.find((o) => /^medium\b/i.test((o as HTMLElement).innerText?.trim() ?? ''))
+            if (medium) { (medium as HTMLElement).click(); return (medium as HTMLElement).innerText?.trim() }
             // Fall back to first option
             if (options.length > 0) { (options[0] as HTMLElement).click(); return (options[0] as HTMLElement).innerText?.trim() }
             return null
