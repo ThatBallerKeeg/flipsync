@@ -113,8 +113,14 @@ async function runJobs() {
       console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist`)
 
       let relisted = 0
-      for (const entry of staleListings) {
+      for (let i = 0; i < staleListings.length; i++) {
+        const entry = staleListings[i]
         try {
+          // Wait 30s between relist attempts to avoid Depop rate-limiting
+          if (i > 0) {
+            console.log(`[AutoRelist] Waiting 30s before next relist...`)
+            await new Promise((r) => setTimeout(r, 30000))
+          }
           console.log(`[AutoRelist] Relisting ${entry.listingId} (listedAt: ${entry.listedAt?.toISOString()})`)
           const result = await relistListing(entry.listingId)
           if (result.success) relisted++

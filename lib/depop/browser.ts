@@ -415,21 +415,24 @@ export async function createDepopListingBrowser(
       }
     }
 
-    // ─── 5b. If no size was provided but the form shows a Size field, pick "Other" or first option
+    // ─── 5b. If no size was provided but the form shows a Size field, pick first option
     if (!listing.size) {
       try {
         const sizeInput = page.getByLabel('Size').first()
-        if (await sizeInput.isVisible().catch(() => false)) {
+        if (await sizeInput.isVisible({ timeout: 2000 }).catch(() => false)) {
           console.log('[Depop] Size field visible but no size set — picking first option')
-          await sizeInput.click()
-          await page.waitForTimeout(500)
-          const firstSizeOpt = page.locator('[role="option"]').first()
-          if (await firstSizeOpt.count() > 0) {
-            const optText = await firstSizeOpt.textContent()
-            await firstSizeOpt.click()
-            console.log('[Depop] Size auto-selected:', optText?.trim())
-            await page.waitForTimeout(300)
+          await sizeInput.click({ timeout: 3000 })
+          await page.waitForTimeout(800)
+          // Use evaluate to click directly (avoids visibility timeout issues)
+          const selectedSize = await page.evaluate(() => {
+            const options = Array.from(document.querySelectorAll('[role="option"]'))
+            if (options.length > 0) { (options[0] as HTMLElement).click(); return (options[0] as HTMLElement).innerText?.trim() }
+            return null
+          })
+          if (selectedSize) {
+            console.log('[Depop] Size auto-selected:', selectedSize)
           }
+          await page.waitForTimeout(300)
         }
       } catch {
         // Size is optional for some categories
@@ -466,41 +469,31 @@ export async function createDepopListingBrowser(
 
       // ─── 8b. Select Package size (required for USPS) ─────────────────────
       // Depop shows a "Package size" combobox after USPS is chosen.
-      // For clothing, "Small" is appropriate; fall back to the first option.
+      // Use page.evaluate to click options directly (avoids Playwright visibility timeout issues).
       try {
         await page.locator('text=Package size').first().scrollIntoViewIfNeeded().catch(() => null)
         await page.waitForTimeout(400)
         const pkgSizeInput = page.getByLabel('Package size').first()
         if (await pkgSizeInput.count() > 0) {
-          await pkgSizeInput.click()
-          await page.waitForTimeout(500)
-          // Try "Small" first (appropriate for most clothing)
-          const smallOpt = page.locator('[role="option"]').filter({ hasText: /small/i }).first()
-          if (await smallOpt.count() > 0) {
-            await smallOpt.click()
-            console.log('[Depop] Package size: Small')
+          await pkgSizeInput.click({ timeout: 5000 })
+          await page.waitForTimeout(800)
+
+          // Use evaluate to find and click the option directly in the DOM
+          const selectedPkg = await page.evaluate(() => {
+            const options = Array.from(document.querySelectorAll('[role="option"]'))
+            // Try "Small" first
+            const small = options.find((o) => /small/i.test((o as HTMLElement).innerText ?? ''))
+            if (small) { (small as HTMLElement).click(); return (small as HTMLElement).innerText?.trim() }
+            // Fall back to first option
+            if (options.length > 0) { (options[0] as HTMLElement).click(); return (options[0] as HTMLElement).innerText?.trim() }
+            return null
+          })
+          if (selectedPkg) {
+            console.log('[Depop] Package size:', selectedPkg)
           } else {
-            // Fall back to first available option
-            const firstPkgOpt = page.locator('[role="option"]').first()
-            if (await firstPkgOpt.count() > 0) {
-              const optText = await firstPkgOpt.textContent()
-              await firstPkgOpt.click()
-              console.log('[Depop] Package size (fallback):', optText?.trim())
-            }
+            console.warn('[Depop] Package size: no options found in dropdown')
           }
           await page.waitForTimeout(300)
-        } else {
-          // The combobox may be inside the shipping section — try a broader selector
-          const pkgInput = page.locator('[data-testid*="package"], [aria-label*="package" i], input[placeholder*="package" i]').first()
-          if (await pkgInput.count() > 0) {
-            await pkgInput.click()
-            await page.waitForTimeout(500)
-            const firstPkgOpt = page.locator('[role="option"]').first()
-            if (await firstPkgOpt.count() > 0) {
-              await firstPkgOpt.click()
-              console.log('[Depop] Package size selected via data-testid')
-            }
-          }
         }
       } catch (e) {
         console.warn('[Depop] Package size selection failed:', e)
