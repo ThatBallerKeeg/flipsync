@@ -90,9 +90,10 @@ export async function POST() {
 
         // Map Depop status field → FlipSync ListingStatus
         // "S" = for Sale, "P" = Pending/sold, "M" = Marked as sold
-        const depopStatus = String(product.status ?? 'S').toUpperCase()
-        const listingStatus =
-          depopStatus === 'S' ? 'ACTIVE' : 'SOLD'
+        const rawDepopStatus = String(product.status ?? 'S').toUpperCase()
+        const listingStatus = rawDepopStatus === 'S' ? 'ACTIVE' : 'SOLD'
+        // Normalize platformStatus to 'active'/'sold' for consistent querying
+        const depopStatus = rawDepopStatus === 'S' ? 'active' : 'sold'
 
         // Depop API fields: created_date = original creation, pub_date = last publish.
         // Use created_date for listing age (when it was first posted).

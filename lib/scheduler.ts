@@ -83,6 +83,20 @@ async function runJobs() {
     if (afterDays > 0 && perDay > 0) {
       const cutoff = new Date()
       cutoff.setDate(cutoff.getDate() - afterDays)
+      console.log(`[AutoRelist] Config: afterDays=${afterDays}, perDay=${perDay}, cutoff=${cutoff.toISOString()}`)
+
+      // Normalize any legacy Depop status codes to human-readable values
+      const migratedActive = await prisma.listingPlatform.updateMany({
+        where: { platform: 'DEPOP', platformStatus: { in: ['S', 's'] } },
+        data: { platformStatus: 'active' },
+      })
+      const migratedSold = await prisma.listingPlatform.updateMany({
+        where: { platform: 'DEPOP', platformStatus: { in: ['P', 'M', 'p', 'm'] } },
+        data: { platformStatus: 'sold' },
+      })
+      if (migratedActive.count > 0 || migratedSold.count > 0) {
+        console.log(`[AutoRelist] Migrated platformStatus: ${migratedActive.count} → 'active', ${migratedSold.count} → 'sold'`)
+      }
 
       const staleListings = await prisma.listingPlatform.findMany({
         where: {
@@ -96,9 +110,12 @@ async function runJobs() {
         take: perDay,
       })
 
+      console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist`)
+
       let relisted = 0
       for (const entry of staleListings) {
         try {
+          console.log(`[AutoRelist] Relisting ${entry.listingId} (listedAt: ${entry.listedAt?.toISOString()})`)
           const result = await relistListing(entry.listingId)
           if (result.success) relisted++
         } catch (err) {
