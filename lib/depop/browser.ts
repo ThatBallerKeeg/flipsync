@@ -115,7 +115,13 @@ export async function createDepopListingBrowser(
     const localPaths: string[] = []
 
     for (const imgUrl of photoUrls) {
-      if (imgUrl.startsWith('/uploads/')) {
+      if (imgUrl.startsWith('/tmp/') || imgUrl.startsWith(os.tmpdir())) {
+        // Absolute local path (pre-downloaded for relist)
+        if (fs.existsSync(imgUrl)) {
+          localPaths.push(imgUrl)
+          console.log(`[Depop] Using pre-downloaded photo: ${imgUrl}`)
+        }
+      } else if (imgUrl.startsWith('/uploads/')) {
         // Legacy local path
         const localPath = path.join(process.cwd(), 'public', imgUrl)
         if (fs.existsSync(localPath)) localPaths.push(localPath)

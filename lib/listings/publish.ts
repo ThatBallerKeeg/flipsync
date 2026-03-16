@@ -2,6 +2,11 @@ import { prisma } from '@/lib/db/client'
 import { createDepopListing } from '@/lib/depop/listings'
 import { createEbayListing } from '@/lib/ebay/listings'
 import { depopFetch } from '@/lib/depop/client'
+import https from 'https'
+import http from 'http'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 export type PublishResult = Record<
   string,
@@ -102,7 +107,30 @@ export async function relistListing(
     throw new Error('Listing is not published on Depop')
   }
 
-  // 1. Delete old listing from Depop
+  // 1. Download photos BEFORE deleting the old listing.
+  //    Synced listings store Depop CDN URLs which become invalid after deletion.
+  const tempPhotos: string[] = []
+  try {
+    for (const photoUrl of listing.photos.slice(0, 4)) {
+      if (!photoUrl.startsWith('http')) continue
+      const ext = photoUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
+      const tmpPath = path.join(os.tmpdir(), `relist-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
+      await new Promise<void>((resolve, reject) => {
+        const file = fs.createWriteStream(tmpPath)
+        const client = photoUrl.startsWith('https://') ? https : http
+        client.get(photoUrl, (res) => {
+          res.pipe(file)
+          file.on('finish', () => { file.close(); resolve() })
+        }).on('error', reject)
+      })
+      tempPhotos.push(tmpPath)
+    }
+    console.log(`[Relist] Pre-downloaded ${tempPhotos.length} photos to temp files`)
+  } catch (err) {
+    console.warn(`[Relist] Photo pre-download failed:`, err)
+  }
+
+  // 2. Delete old listing from Depop
   try {
     await depopFetch(`/products/${depopPlatform.platformListingId}/`, {
       method: 'DELETE',
@@ -110,26 +138,36 @@ export async function relistListing(
     console.log(`[Relist] Deleted old Depop listing: ${depopPlatform.platformListingId}`)
   } catch (err) {
     console.warn(`[Relist] Failed to delete old listing (may already be gone):`, err)
-    // Continue anyway — the old listing might have been manually deleted
   }
 
-  // 2. Create new listing via Playwright
-  const result = await createDepopListing(
-    listing as Parameters<typeof createDepopListing>[0]
-  )
+  // 3. Create new listing via Playwright using pre-downloaded photos
+  const listingWithLocalPhotos = {
+    ...listing,
+    photos: tempPhotos.length > 0 ? tempPhotos : listing.photos,
+  }
 
-  // 3. Update ListingPlatform with new IDs and fresh listedAt
-  await prisma.listingPlatform.update({
-    where: { id: depopPlatform.id },
-    data: {
-      platformListingId: result.listingId,
-      platformUrl: result.url,
-      platformStatus: 'active',
-      listedAt: new Date(),
-    },
-  })
+  try {
+    const result = await createDepopListing(
+      listingWithLocalPhotos as Parameters<typeof createDepopListing>[0]
+    )
 
-  console.log(`[Relist] New Depop listing created: ${result.url}`)
+    // 4. Update ListingPlatform with new IDs and fresh listedAt
+    await prisma.listingPlatform.update({
+      where: { id: depopPlatform.id },
+      data: {
+        platformListingId: result.listingId,
+        platformUrl: result.url,
+        platformStatus: 'active',
+        listedAt: new Date(),
+      },
+    })
 
-  return { success: true, newUrl: result.url }
+    console.log(`[Relist] New Depop listing created: ${result.url}`)
+    return { success: true, newUrl: result.url }
+  } finally {
+    // Clean up temp files
+    for (const f of tempPhotos) {
+      fs.unlink(f, () => {})
+    }
+  }
 }
