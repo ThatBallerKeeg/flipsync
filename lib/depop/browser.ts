@@ -250,9 +250,9 @@ export async function createDepopListingBrowser(
       }
 
       if (!categoryChosen) {
-        // Last resort: open the Category combobox (id="group-input") and search
+        // Last resort: open the Category combobox and search
         const categoryInput = page.locator('#group-input, input[aria-controls="group-menu"]').first()
-        if (await categoryInput.count() > 0) {
+        if (await categoryInput.count() > 0 && listingCat.length > 0) {
           await categoryInput.click()
           await page.waitForTimeout(500)
           // Type a search term derived from listing category
@@ -262,13 +262,41 @@ export async function createDepopListingBrowser(
             : listingCat.includes('jacket') ? 'Jackets'
             : listingCat.includes('dress') ? 'Dresses'
             : listingCat.split(/[>/,]/)[0].trim()
-          await categoryInput.type(searchTerm, { delay: 50 })
-          await page.waitForTimeout(800)
-          const firstOpt = page.locator('[role="option"]').first()
-          if (await firstOpt.count() > 0) {
-            await firstOpt.click()
-            console.log('[Depop] Category selected via combobox search:', searchTerm)
+          if (searchTerm) {
+            await categoryInput.type(searchTerm, { delay: 50 })
+            await page.waitForTimeout(800)
+            const firstOpt = page.locator('[role="option"]').first()
+            if (await firstOpt.count() > 0) {
+              await firstOpt.click()
+              console.log('[Depop] Category selected via combobox search:', searchTerm)
+              categoryChosen = true
+            }
           }
+        }
+      }
+
+      // Ultimate fallback: if category is still empty (e.g. synced listing with no category),
+      // click the FIRST AI-suggested category pill from Depop's autotagging
+      if (!categoryChosen) {
+        console.log('[Depop] No category set — trying to click first AI-suggested pill')
+        const suggestedPill = await page.evaluate(() => {
+          // Look for any clickable element containing " / " (category format like "Men / T-shirts")
+          const allEls = Array.from(document.querySelectorAll('*'))
+          for (const el of allEls) {
+            const text = (el as HTMLElement).innerText?.trim() ?? ''
+            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
+              ;(el as HTMLElement).click()
+              return text
+            }
+          }
+          return null
+        })
+        if (suggestedPill) {
+          console.log('[Depop] Category selected via first AI suggestion:', suggestedPill)
+          categoryChosen = true
+          await page.waitForTimeout(400)
+        } else {
+          console.warn('[Depop] No category could be selected — form may fail')
         }
       }
     } catch (e) {
@@ -384,6 +412,27 @@ export async function createDepopListingBrowser(
         }
       } catch (e) {
         console.warn('[Depop] Size selection error:', e)
+      }
+    }
+
+    // ─── 5b. If no size was provided but the form shows a Size field, pick "Other" or first option
+    if (!listing.size) {
+      try {
+        const sizeInput = page.getByLabel('Size').first()
+        if (await sizeInput.isVisible().catch(() => false)) {
+          console.log('[Depop] Size field visible but no size set — picking first option')
+          await sizeInput.click()
+          await page.waitForTimeout(500)
+          const firstSizeOpt = page.locator('[role="option"]').first()
+          if (await firstSizeOpt.count() > 0) {
+            const optText = await firstSizeOpt.textContent()
+            await firstSizeOpt.click()
+            console.log('[Depop] Size auto-selected:', optText?.trim())
+            await page.waitForTimeout(300)
+          }
+        }
+      } catch {
+        // Size is optional for some categories
       }
     }
 

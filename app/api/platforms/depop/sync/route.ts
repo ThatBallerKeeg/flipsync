@@ -83,8 +83,13 @@ export async function POST() {
           .filter(Boolean)
           .slice(0, 8)
 
-        // Size
+        // Size & Category
         const size = product.size ? String(product.size) : undefined
+        // Extract category from Depop's categories array (e.g. [{ id: 5, name: "T-shirts" }])
+        const categories = (product.categories ?? []) as { id?: number; name?: string }[]
+        const category = categories.map((c) => c.name).filter(Boolean).join(' > ') || undefined
+        // Also extract condition
+        const condition = product.condition ? String(product.condition).toLowerCase() : undefined
         const platformUrl = `https://www.depop.com/products/${slug}/`
         const existing = existingMap.get(depopId)
 
@@ -103,7 +108,7 @@ export async function POST() {
         if (existing) {
           await prisma.listing.update({
             where: { id: existing.listingId },
-            data: { title, description, depopDescription: description, price, photos, status: listingStatus, ...(size && { size }) },
+            data: { title, description, depopDescription: description, price, photos, status: listingStatus, ...(size && { size }), ...(category && { category }), ...(condition && { condition }) },
           })
           await prisma.listingPlatform.update({
             where: { id: existing.id },
@@ -117,7 +122,7 @@ export async function POST() {
           })
         } else {
           const listing = await prisma.listing.create({
-            data: { title, description, depopDescription: description, price, photos, tags: [], status: listingStatus, ...(size && { size }) },
+            data: { title, description, depopDescription: description, price, photos, tags: [], status: listingStatus, ...(size && { size }), ...(category && { category }), ...(condition && { condition }) },
           })
           await prisma.listingPlatform.create({
             data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt: listedAt ?? new Date() },
