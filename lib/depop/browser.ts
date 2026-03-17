@@ -184,11 +184,40 @@ export async function createDepopListingBrowser(
     // ─── 2. Fill description ──────────────────────────────────────────────────
     const rawDesc = listing.depopDescription ?? listing.description ?? ''
     const desc = sanitizeDepopDescription(rawDesc)
-    await page.fill('textarea[name="description"]', desc)
+    console.log(`[Depop] Filling description (${desc.length} chars): "${desc.slice(0, 80)}..."`)
+    try {
+      await page.fill('textarea[name="description"]', desc)
+      console.log('[Depop] Description filled ✓')
+    } catch (descErr) {
+      console.error('[Depop] Description fill FAILED:', descErr)
+      // Try fallback: any visible textarea
+      try {
+        const textarea = page.locator('textarea').first()
+        await textarea.fill(desc)
+        console.log('[Depop] Description filled via fallback textarea ✓')
+      } catch {
+        console.error('[Depop] Description fallback also failed')
+      }
+    }
 
     // ─── 3. Fill price ────────────────────────────────────────────────────────
-    const priceInput = page.locator('[data-testid="priceAmount__input"]')
-    await priceInput.fill(String(listing.price))
+    const priceStr = String(listing.price ?? 0)
+    console.log(`[Depop] Filling price: ${priceStr}`)
+    try {
+      const priceInput = page.locator('[data-testid="priceAmount__input"]')
+      await priceInput.fill(priceStr)
+      console.log('[Depop] Price filled ✓')
+    } catch (priceErr) {
+      console.error('[Depop] Price fill FAILED:', priceErr)
+      // Try fallback: input near "Price" label
+      try {
+        const priceFallback = page.getByLabel(/price/i).first()
+        await priceFallback.fill(priceStr)
+        console.log('[Depop] Price filled via fallback ✓')
+      } catch {
+        console.error('[Depop] Price fallback also failed')
+      }
+    }
 
     // ─── 3b. Select category (required) ──────────────────────────────────────
     // Depop's autotagging AI suggests categories below the Category combobox.
@@ -550,7 +579,15 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 9. Click "Post" to publish ───────────────────────────────────────────
-    // There are two submit buttons: "Post" (first) and "Save as a draft" (second)
+    // Dump form state for debugging
+    const formState = await page.evaluate(() => {
+      const desc = (document.querySelector('textarea[name="description"]') as HTMLTextAreaElement)?.value ?? '(not found)'
+      const price = (document.querySelector('[data-testid="priceAmount__input"]') as HTMLInputElement)?.value ?? '(not found)'
+      const photoCount = document.querySelectorAll('img[src*="media-photos"], img[src*="s3.amazonaws"]').length
+      return { desc: desc.slice(0, 50), price, photoCount }
+    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1 }))
+    console.log(`[Depop] Pre-submit form state: photos=${formState.photoCount}, price="${formState.price}", desc="${formState.desc}"`)
+
     await page.screenshot({ path: '/tmp/depop-before-submit.png' }).catch(() => null)
     const postBtn = page.locator('button[type="submit"]').first()
     await postBtn.click()
@@ -598,13 +635,36 @@ export async function createDepopListingBrowser(
       } else {
         // Genuine form error — capture diagnostics
         await page.screenshot({ path: '/tmp/depop-error.png' }).catch(() => null)
+
+        // Try to identify which specific fields have errors
+        const fieldErrors = await page.evaluate(() => {
+          const errors: string[] = []
+          // Look for error messages near form fields
+          const errorEls = document.querySelectorAll('[role="alert"], [data-testid*="error"], p[class*="error" i], span[class*="error" i], [class*="Error" i]')
+          errorEls.forEach(el => {
+            // Find the nearest label or section heading
+            const parent = el.closest('div[class*="field"], fieldset, section, [class*="Field"]')
+            const label = parent?.querySelector('label, legend, h2, h3, [class*="label" i]')
+            const fieldName = label?.textContent?.trim() || '(unknown field)'
+            const errorText = el.textContent?.trim() || ''
+            if (errorText && errorText.length < 120) {
+              errors.push(`${fieldName}: ${errorText}`)
+            }
+          })
+          return errors
+        }).catch(() => [] as string[])
+
         const allErrors = await page
           .locator('[role="alert"], [data-testid*="error"], p[class*="error" i], span[class*="error" i]')
           .allTextContents()
           .catch(() => [] as string[])
         const shortErrors = allErrors.map((t) => t.trim()).filter((t) => t.length > 0 && t.length < 120)
+
+        console.error(`[Depop] Field-level errors:`, fieldErrors)
+        console.error(`[Depop] All errors:`, shortErrors)
+
         throw new Error(
-          `Listing submission failed${shortErrors.length ? ': ' + shortErrors.join(' | ') : '. Check Depop manually.'} | Page snippet: ${pageText.slice(0, 200)}`
+          `Listing submission failed${fieldErrors.length ? ': ' + fieldErrors.join(' | ') : shortErrors.length ? ': ' + shortErrors.join(' | ') : '. Check Depop manually.'} | Page snippet: ${pageText.slice(0, 200)}`
         )
       }
     }
