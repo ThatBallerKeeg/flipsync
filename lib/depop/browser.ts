@@ -221,113 +221,99 @@ export async function createDepopListingBrowser(
 
     // ─── 3b. Select category (required) ──────────────────────────────────────
     // Depop's autotagging AI suggests categories below the Category combobox.
-    // The suggestion pills are not <button> elements — use text-based clicking.
+    // IMPORTANT: Avoid "Reworked / Upcycled" — it's wrong for clothing items
+    // and may not have a Size field, causing cascading form errors.
     try {
       // Scroll to bring the Category section into view
       await page.locator('text=Category').first().scrollIntoViewIfNeeded().catch(() => null)
       await page.waitForTimeout(800)
 
-      // Try clicking an AI-suggested pill by matching the listing category
       const listingCat = (listing.category ?? '').toLowerCase()
       const categoryKeywords = [
-        ['t-shirt', 'T-shirts'], ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
+        ['t-shirt', 'T-shirts'], ['jersey', 'T-shirts'], ['tee', 'T-shirts'],
+        ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
         ['pant', 'Pants'], ['short', 'Shorts'], ['jean', 'Jeans'],
         ['jacket', 'Jackets'], ['coat', 'Coats'], ['blazer', 'Blazers'],
         ['dress', 'Dresses'], ['skirt', 'Skirts'], ['shirt', 'Shirts'],
         ['top', 'Tops'], ['sneaker', 'Sneakers'], ['boot', 'Boots'],
-        ['hat', 'Hats'], ['bag', 'Bags'],
+        ['hat', 'Hats'], ['bag', 'Bags'], ['shoe', 'Shoes'],
       ]
 
       let categoryChosen = false
-      for (const [keyword, label] of categoryKeywords) {
-        if (listingCat.includes(keyword)) {
-          // getByText matches any element containing this text (element-type agnostic)
-          const pill = page.getByText(label, { exact: false }).first()
-          if (await pill.count() > 0) {
-            await pill.click()
-            await page.waitForTimeout(400)
-            console.log('[Depop] Category selected via pill:', label)
-            categoryChosen = true
+
+      // Strategy 1: Use the Category combobox to search for a specific clothing category
+      const categoryInput = page.locator('#group-input, input[aria-controls="group-menu"]').first()
+      if (await categoryInput.count() > 0) {
+        // Determine search term from listing data
+        let searchTerm = ''
+        for (const [keyword, label] of categoryKeywords) {
+          if (listingCat.includes(keyword)) {
+            searchTerm = label
             break
           }
         }
+        // Also try title-based inference for synced listings with generic categories
+        if (!searchTerm) {
+          const title = (listing.title ?? '').toLowerCase()
+          for (const [keyword, label] of categoryKeywords) {
+            if (title.includes(keyword)) {
+              searchTerm = label
+              break
+            }
+          }
+        }
+
+        if (searchTerm) {
+          await categoryInput.click()
+          await page.waitForTimeout(500)
+          await categoryInput.type(searchTerm, { delay: 50 })
+          await page.waitForTimeout(800)
+          // Pick the first option that is NOT "Reworked" or "Upcycled"
+          const picked = await page.evaluate((badPatterns) => {
+            const options = Array.from(document.querySelectorAll('[role="option"]'))
+            for (const o of options) {
+              const text = (o as HTMLElement).innerText?.trim() ?? ''
+              if (badPatterns.some((p: string) => text.toLowerCase().includes(p))) continue
+              ;(o as HTMLElement).click()
+              return text
+            }
+            return null
+          }, ['reworked', 'upcycled', 'craft'])
+          if (picked) {
+            console.log('[Depop] Category selected via combobox search:', picked)
+            categoryChosen = true
+          }
+          await page.keyboard.press('Escape')
+          await page.waitForTimeout(300)
+        }
       }
 
+      // Strategy 2: Click a Depop AI-suggested pill (but NEVER Reworked/Upcycled)
       if (!categoryChosen) {
-        // Fall back: click the first pill INSIDE the Suggested section specifically
         const chosen = await page.evaluate(() => {
-          // Find the "Suggested" label element
+          const badWords = ['reworked', 'upcycled', 'craft', 'handmade', 'vintage']
+          // Find all elements that look like category pills (contain " / ")
           const allEls = Array.from(document.querySelectorAll('*'))
-          const suggested = allEls.find(
-            (el) => (el as HTMLElement).innerText?.trim() === 'Suggested'
-          )
-          if (suggested) {
-            // The pills are siblings of "Suggested" — search within parent container
-            const container = suggested.parentElement
-            if (container) {
-              const candidates = Array.from(container.querySelectorAll('*'))
-              for (const c of candidates) {
-                const text = (c as HTMLElement).innerText ?? ''
-                if (text.includes(' / ') && text.length < 40 && c.children.length <= 3) {
-                  ;(c as HTMLElement).click()
-                  return text
-                }
-              }
+          for (const el of allEls) {
+            const text = (el as HTMLElement).innerText?.trim() ?? ''
+            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
+              if (badWords.some(w => text.toLowerCase().includes(w))) continue
+              ;(el as HTMLElement).click()
+              return text
+            }
+          }
+          // If ALL pills are bad categories, pick the first one anyway (better than nothing)
+          for (const el of allEls) {
+            const text = (el as HTMLElement).innerText?.trim() ?? ''
+            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
+              ;(el as HTMLElement).click()
+              return text + ' (only option)'
             }
           }
           return null
         })
         if (chosen) {
-          console.log('[Depop] Category selected via evaluate:', chosen)
-          categoryChosen = true
-          await page.waitForTimeout(400)
-        }
-      }
-
-      if (!categoryChosen) {
-        // Last resort: open the Category combobox and search
-        const categoryInput = page.locator('#group-input, input[aria-controls="group-menu"]').first()
-        if (await categoryInput.count() > 0 && listingCat.length > 0) {
-          await categoryInput.click()
-          await page.waitForTimeout(500)
-          // Type a search term derived from listing category
-          const searchTerm = listingCat.includes('t-shirt') ? 'T-shirts'
-            : listingCat.includes('shirt') ? 'Shirts'
-            : listingCat.includes('pant') ? 'Pants'
-            : listingCat.includes('jacket') ? 'Jackets'
-            : listingCat.includes('dress') ? 'Dresses'
-            : listingCat.split(/[>/,]/)[0].trim()
-          if (searchTerm) {
-            await categoryInput.type(searchTerm, { delay: 50 })
-            await page.waitForTimeout(800)
-            const firstOpt = page.locator('[role="option"]').first()
-            if (await firstOpt.count() > 0) {
-              await firstOpt.click()
-              console.log('[Depop] Category selected via combobox search:', searchTerm)
-              categoryChosen = true
-            }
-          }
-        }
-      }
-
-      // Ultimate fallback: if category is still empty (e.g. synced listing with no category),
-      // click the FIRST AI-suggested category pill from Depop's autotagging
-      if (!categoryChosen) {
-        console.log('[Depop] No category set — trying to click first AI-suggested pill')
-        const suggestedPill = await page.evaluate(() => {
-          // Look for any clickable element containing " / " (category format like "Men / T-shirts")
-          const allEls = Array.from(document.querySelectorAll('*'))
-          for (const el of allEls) {
-            const text = (el as HTMLElement).innerText?.trim() ?? ''
-            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
-              ;(el as HTMLElement).click()
-              return text
-            }
-          }
-          return null
-        })
-        if (suggestedPill) {
-          console.log('[Depop] Category selected via first AI suggestion:', suggestedPill)
+          console.log('[Depop] Category selected via AI pill:', chosen)
           categoryChosen = true
           await page.waitForTimeout(400)
         } else {
@@ -338,38 +324,70 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Category selection failed:', e)
     }
 
+    // Dismiss any open dropdowns before next field
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+
     // ─── 4. Select condition via combobox ─────────────────────────────────────
+    // Use page.evaluate to find and click the Condition combobox by label scan
+    // (avoids getByLabel matching wrong field)
     const conditionText = CONDITION_MAP[listing.condition ?? 'good'] ?? 'Good'
     try {
-      // Scroll condition field into view
-      await page.locator('text=Condition').first().scrollIntoViewIfNeeded().catch(() => null)
-      await page.waitForTimeout(400)
-      // Use the combobox input near the Condition label (strict: use .first() to avoid multiple matches)
-      const conditionInput = page.getByLabel('Condition').first()
-      if (await conditionInput.count() > 0) {
-        await conditionInput.click()
-        await page.waitForTimeout(700)
-        // Select matching option; fall back to first option
-        const option = page.locator('[role="option"]').filter({ hasText: new RegExp(conditionText, 'i') }).first()
-        if (await option.count() > 0) {
-          await option.click()
-          console.log('[Depop] Condition selected:', conditionText)
-        } else {
-          await page.locator('[role="option"]').first().click().catch(() => null)
-          console.log('[Depop] Condition selected: first option (fallback)')
+      const conditionResult = await page.evaluate((targetCondition) => {
+        const labels = Array.from(document.querySelectorAll('label'))
+        for (const label of labels) {
+          const text = label.textContent?.trim() ?? ''
+          if (/^condition\b/i.test(text)) {
+            const forId = label.getAttribute('for')
+            const input = forId ? document.getElementById(forId) as HTMLInputElement : label.querySelector('input')
+            if (input) {
+              input.scrollIntoView({ block: 'center' })
+              input.click()
+              return { found: true, inputId: input.id, labelText: text }
+            }
+          }
         }
+        return { found: false, inputId: null, labelText: null }
+      }, conditionText)
+
+      if (conditionResult.found) {
+        await page.waitForTimeout(700)
+        // Select matching option from the now-open dropdown
+        const picked = await page.evaluate((target) => {
+          const options = Array.from(document.querySelectorAll('[role="option"]'))
+          // Try matching the target condition
+          for (const o of options) {
+            const text = (o as HTMLElement).innerText?.trim() ?? ''
+            if (text.toLowerCase().includes(target.toLowerCase())) {
+              ;(o as HTMLElement).click()
+              return text
+            }
+          }
+          // Fallback: pick first option
+          if (options.length > 0) {
+            const text = (options[0] as HTMLElement).innerText?.trim() ?? ''
+            ;(options[0] as HTMLElement).click()
+            return text + ' (fallback)'
+          }
+          return null
+        }, conditionText)
+        console.log('[Depop] Condition selected:', picked)
+      } else {
+        console.warn('[Depop] Condition field not found on page')
       }
     } catch (e) {
       console.warn('[Depop] Condition selection failed:', e)
     }
 
+    // Dismiss any open dropdowns before Size
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(400)
+
     // ─── 5. Select size (required when category has sizes) ───────────────────
+    // IMPORTANT: Only use label scan approach. Do NOT use getByLabel('Size') — it
+    // matches the Condition field on Depop's form and corrupts the entire form state.
     console.log(`[Depop] Size selection — listing.size="${listing.size ?? '(null)'}"`)
     {
-      // Dismiss any open dropdowns first
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(300)
-
       const sizeRaw = (listing.size ?? '').trim()
       const SIZE_NORM: Record<string, string> = {
         'extra small': 'XS', 'xs': 'XS',
@@ -384,8 +402,8 @@ export async function createDepopListingBrowser(
       let sizeChosen = false
 
       try {
-        // Strategy 1: Find the Size combobox using multiple approaches
-        // First, scan all labels on the page to find the Size field
+        // Use page.evaluate to find the Size field by scanning labels directly in the DOM.
+        // This is the ONLY reliable approach — getByLabel('Size') matches the wrong field.
         const sizeFieldInfo = await page.evaluate(() => {
           const labels = Array.from(document.querySelectorAll('label'))
           const found: { labelText: string; inputId: string | null }[] = []
@@ -402,46 +420,53 @@ export async function createDepopListingBrowser(
         })
         console.log('[Depop] Size fields found on page:', JSON.stringify(sizeFieldInfo))
 
-        if (sizeFieldInfo.length > 0) {
-          // Click the Size input to open the dropdown
-          const escapedId = sizeFieldInfo[0].inputId?.replace(/([^\w-])/g, '\\$1')
-          const sizeInput = escapedId
-            ? page.locator(`#${escapedId}`)
-            : page.getByLabel(/^size\b/i).first()
+        if (sizeFieldInfo.length > 0 && sizeFieldInfo[0].inputId) {
+          // Click the Size input using page.evaluate to avoid Playwright selector confusion
+          await page.evaluate((inputId) => {
+            const input = document.getElementById(inputId)
+            if (input) {
+              input.scrollIntoView({ block: 'center' })
+              input.click()
+            }
+          }, sizeFieldInfo[0].inputId)
+          await page.waitForTimeout(800)
 
-          if (await sizeInput.count() > 0) {
-            await sizeInput.scrollIntoViewIfNeeded().catch(() => null)
+          // Verify we opened the RIGHT dropdown by checking the options
+          const availableOptions = await page.evaluate(() => {
+            return Array.from(document.querySelectorAll('[role="option"]'))
+              .map(o => (o as HTMLElement).innerText?.trim() ?? '')
+              .slice(0, 15)
+          })
+          console.log('[Depop] Size options available:', availableOptions.join(', '))
+
+          // Sanity check: if the options look like condition values, we opened the wrong dropdown
+          const looksLikeConditions = availableOptions.some(o => /^(new with tags|like new|good|fair|poor)$/i.test(o))
+          if (looksLikeConditions) {
+            console.error('[Depop] Size dropdown opened but shows CONDITION options — aborting size selection')
+            await page.keyboard.press('Escape')
             await page.waitForTimeout(300)
-            await sizeInput.click()
-            await page.waitForTimeout(800)
-
-            // Get all available options
-            const availableOptions = await page.locator('[role="option"]').allTextContents()
-            console.log('[Depop] Size options available:', availableOptions.slice(0, 10).join(', '))
-
+          } else if (availableOptions.length > 0) {
             if (sizeNorm) {
-              // Try exact match first
-              const sizeOption = page.locator('[role="option"]').filter({
-                hasText: new RegExp(`^${sizeNorm}$|\\b${sizeNorm}\\b`, 'i'),
-              }).first()
-              if (await sizeOption.count() > 0) {
-                await sizeOption.click()
-                console.log('[Depop] Size selected:', sizeNorm)
-                sizeChosen = true
-              } else {
-                // Type to filter
-                await sizeInput.fill(sizeNorm)
-                await page.waitForTimeout(500)
-                const filtered = page.locator('[role="option"]').first()
-                if (await filtered.count() > 0) {
-                  await filtered.click()
-                  console.log('[Depop] Size selected via typed filter:', sizeNorm)
-                  sizeChosen = true
+              // Try to click matching size option via evaluate
+              const picked = await page.evaluate((target) => {
+                const options = Array.from(document.querySelectorAll('[role="option"]'))
+                // Exact match
+                for (const o of options) {
+                  const text = (o as HTMLElement).innerText?.trim() ?? ''
+                  if (text.toUpperCase() === target.toUpperCase() || new RegExp(`\\b${target}\\b`, 'i').test(text)) {
+                    ;(o as HTMLElement).click()
+                    return text
+                  }
                 }
+                return null
+              }, sizeNorm)
+              if (picked) {
+                console.log('[Depop] Size selected:', picked)
+                sizeChosen = true
               }
             }
 
-            // If no size provided or matching failed, pick first size-like option
+            // If no match or no size provided, pick a size-like option
             if (!sizeChosen) {
               const picked = await page.evaluate(() => {
                 const options = Array.from(document.querySelectorAll('[role="option"]'))
@@ -449,15 +474,15 @@ export async function createDepopListingBrowser(
                 for (const o of options) {
                   const text = (o as HTMLElement).innerText?.trim() ?? ''
                   if (sizePattern.test(text)) {
-                    (o as HTMLElement).click()
+                    ;(o as HTMLElement).click()
                     return text
                   }
                 }
-                // Fall back to first option if available
+                // Fall back to first option if it doesn't look like a condition
                 if (options.length > 0) {
                   const text = (options[0] as HTMLElement).innerText?.trim() ?? ''
                   if (!/new|like new|good|fair|poor|tags/i.test(text)) {
-                    (options[0] as HTMLElement).click()
+                    ;(options[0] as HTMLElement).click()
                     return text
                   }
                 }
@@ -471,39 +496,10 @@ export async function createDepopListingBrowser(
             await page.waitForTimeout(300)
           }
         } else {
-          // Try getByLabel as fallback
-          const sizeByLabel = page.getByLabel('Size').first()
-          if (await sizeByLabel.count() > 0) {
-            await sizeByLabel.scrollIntoViewIfNeeded().catch(() => null)
-            await sizeByLabel.click()
-            await page.waitForTimeout(800)
-            const picked = await page.evaluate(() => {
-              const options = Array.from(document.querySelectorAll('[role="option"]'))
-              const sizePattern = /^(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|One Size|US \d|UK \d|\d{1,2})/i
-              for (const o of options) {
-                const text = (o as HTMLElement).innerText?.trim() ?? ''
-                if (sizePattern.test(text)) {
-                  (o as HTMLElement).click()
-                  return text
-                }
-              }
-              if (options.length > 0) {
-                const text = (options[0] as HTMLElement).innerText?.trim() ?? ''
-                ;(options[0] as HTMLElement).click()
-                return text
-              }
-              return null
-            })
-            if (picked) {
-              console.log('[Depop] Size auto-selected via getByLabel:', picked)
-              sizeChosen = true
-            }
-          } else {
-            console.log('[Depop] No Size field found on page — may not be required for this category')
-          }
+          console.log('[Depop] No Size field found on page — may not be required for this category')
         }
 
-        if (!sizeChosen) {
+        if (!sizeChosen && sizeFieldInfo.length > 0) {
           console.warn('[Depop] Size NOT selected — this may cause a required field error')
         }
       } catch (e) {
@@ -511,27 +507,55 @@ export async function createDepopListingBrowser(
       }
     }
 
+    // Dismiss any open dropdowns before Brand
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+
     // ─── 7. Fill brand (optional) ─────────────────────────────────────────────
     if (listing.brand) {
       try {
-        const brandInput = page.getByLabel('Brand')
-        if (await brandInput.count() > 0) {
-          await brandInput.click()
-          await brandInput.fill(listing.brand)
+        // Use label scan instead of getByLabel to avoid matching wrong field
+        const brandFilled = await page.evaluate((brand) => {
+          const labels = Array.from(document.querySelectorAll('label'))
+          for (const label of labels) {
+            const text = label.textContent?.trim() ?? ''
+            if (/^brand\b/i.test(text)) {
+              const forId = label.getAttribute('for')
+              const input = forId ? document.getElementById(forId) as HTMLInputElement : label.querySelector('input') as HTMLInputElement
+              if (input) {
+                input.scrollIntoView({ block: 'center' })
+                input.click()
+                input.value = ''
+                // Use native input event to trigger React state
+                input.dispatchEvent(new Event('input', { bubbles: true }))
+                return true
+              }
+            }
+          }
+          return false
+        }, listing.brand)
+
+        if (brandFilled) {
+          // Now type via Playwright for proper React event handling
+          await page.keyboard.type(listing.brand, { delay: 30 })
           await page.waitForTimeout(800)
-          // Click the first autocomplete suggestion
           const firstOpt = page.locator('[role="option"]').first()
           if (await firstOpt.count() > 0) {
             await firstOpt.click()
+            console.log('[Depop] Brand selected:', listing.brand)
           } else {
-            // Press Enter to accept typed brand
-            await brandInput.press('Enter')
+            await page.keyboard.press('Enter')
+            console.log('[Depop] Brand typed (no suggestions):', listing.brand)
           }
         }
       } catch {
         // Brand is optional
       }
     }
+
+    // Dismiss any open dropdowns before shipping
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
 
     // ─── 8. Ensure USPS shipping is selected ─────────────────────────────────
     const uspsRadio = page.locator('[data-testid="usps__shipping__input"]')
@@ -540,14 +564,30 @@ export async function createDepopListingBrowser(
       await page.waitForTimeout(600)
 
       // ─── 8b. Select Package size (required for USPS) ─────────────────────
-      // Depop shows a "Package size" combobox after USPS is chosen.
-      // Use page.evaluate to click options directly (avoids Playwright visibility timeout issues).
+      // Use page.evaluate to find by label scan and click directly
       try {
-        await page.locator('text=Package size').first().scrollIntoViewIfNeeded().catch(() => null)
-        await page.waitForTimeout(400)
-        const pkgSizeInput = page.getByLabel('Package size').first()
-        if (await pkgSizeInput.count() > 0) {
-          await pkgSizeInput.click({ timeout: 5000 })
+        // Dismiss any open dropdowns first
+        await page.keyboard.press('Escape')
+        await page.waitForTimeout(300)
+
+        const pkgResult = await page.evaluate(() => {
+          const labels = Array.from(document.querySelectorAll('label'))
+          for (const label of labels) {
+            const text = label.textContent?.trim() ?? ''
+            if (/package\s*size/i.test(text)) {
+              const forId = label.getAttribute('for')
+              const input = forId ? document.getElementById(forId) : label.querySelector('input')
+              if (input) {
+                input.scrollIntoView({ block: 'center' })
+                input.click()
+                return { found: true }
+              }
+            }
+          }
+          return { found: false }
+        })
+
+        if (pkgResult.found) {
           await page.waitForTimeout(800)
 
           // Use evaluate to find and click the option directly in the DOM
@@ -572,56 +612,89 @@ export async function createDepopListingBrowser(
             console.warn('[Depop] Package size: no options found in dropdown')
           }
           await page.waitForTimeout(300)
+        } else {
+          console.warn('[Depop] Package size field not found')
         }
       } catch (e) {
         console.warn('[Depop] Package size selection failed:', e)
       }
     }
 
-    // ─── 8b. Pre-submit: scan for any unfilled required comboboxes and try to pick first option
+    // ─── 8c. Pre-submit: scan for any unfilled required comboboxes and auto-fill
+    // Uses page.evaluate to directly click inputs by their DOM ID (NOT getByLabel)
     try {
       await page.keyboard.press('Escape')
-      await page.waitForTimeout(200)
+      await page.waitForTimeout(300)
+
+      // Find all unfilled combobox inputs and their IDs
       const unfilledFields = await page.evaluate(() => {
-        const results: string[] = []
-        // Look for combobox inputs that are empty (likely required fields we missed)
+        const results: { labelText: string; inputId: string | null }[] = []
         const inputs = Array.from(document.querySelectorAll('input[role="combobox"], input[aria-haspopup="listbox"]'))
         for (const input of inputs) {
           const val = (input as HTMLInputElement).value?.trim()
           if (!val) {
             const label = input.closest('label') ?? document.querySelector(`label[for="${input.id}"]`)
             const labelText = label?.textContent?.trim() ?? input.getAttribute('aria-label') ?? '(unknown)'
-            // Skip package size (already handled) and search
-            if (!/package|search|brand/i.test(labelText)) {
-              results.push(labelText)
+            // Skip fields we already handle or that are optional
+            if (!/package|search|brand|category/i.test(labelText)) {
+              results.push({ labelText, inputId: input.id || null })
             }
           }
         }
         return results
       })
+
       if (unfilledFields.length > 0) {
-        console.warn(`[Depop] Unfilled combobox fields before submit: ${unfilledFields.join(', ')}`)
-        // Try to fill each one by clicking and picking first option
-        for (const fieldLabel of unfilledFields) {
+        console.warn(`[Depop] Unfilled combobox fields before submit: ${unfilledFields.map(f => f.labelText).join(', ')}`)
+
+        // Fill each one using page.evaluate to click the input directly by ID
+        for (const field of unfilledFields) {
           try {
-            const input = page.getByLabel(new RegExp(fieldLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first()
-            if (await input.count() > 0) {
-              await input.scrollIntoViewIfNeeded().catch(() => null)
-              await input.click()
-              await page.waitForTimeout(800)
-              const firstOpt = page.locator('[role="option"]').first()
-              if (await firstOpt.count() > 0) {
-                const optText = await firstOpt.innerText().catch(() => '')
-                await firstOpt.click()
-                console.log(`[Depop] Auto-filled "${fieldLabel}" with: ${optText.trim()}`)
-              } else {
-                console.warn(`[Depop] No options for "${fieldLabel}"`)
+            // Dismiss any open dropdown first
+            await page.keyboard.press('Escape')
+            await page.waitForTimeout(200)
+
+            // Click the input to open its dropdown
+            const opened = await page.evaluate((inputId) => {
+              if (!inputId) return false
+              const input = document.getElementById(inputId)
+              if (input) {
+                input.scrollIntoView({ block: 'center' })
+                input.click()
+                return true
               }
-              await page.keyboard.press('Escape')
-              await page.waitForTimeout(300)
+              return false
+            }, field.inputId)
+
+            if (!opened) {
+              console.warn(`[Depop] Could not open "${field.labelText}" (no input ID)`)
+              continue
             }
+
+            await page.waitForTimeout(800)
+
+            // Pick the first option, but VERIFY it's not a condition/size value
+            const picked = await page.evaluate((fieldLabel) => {
+              const options = Array.from(document.querySelectorAll('[role="option"]'))
+              if (options.length === 0) return null
+              // Sanity: if this looks like condition or size options, don't pick
+              const firstText = (options[0] as HTMLElement).innerText?.trim() ?? ''
+              if (/^(new with tags|like new|good|fair|poor)$/i.test(firstText)) return '(skipped: condition values)'
+              if (/^(XXS|XS|S|M|L|XL|XXL)$/i.test(firstText)) return '(skipped: size values)'
+              ;(options[0] as HTMLElement).click()
+              return firstText
+            }, field.labelText)
+
+            if (picked && !picked.startsWith('(skipped')) {
+              console.log(`[Depop] Auto-filled "${field.labelText}" with: ${picked}`)
+            } else {
+              console.warn(`[Depop] Skipped or no options for "${field.labelText}": ${picked}`)
+            }
+
+            await page.keyboard.press('Escape')
+            await page.waitForTimeout(300)
           } catch {
-            console.warn(`[Depop] Failed to auto-fill "${fieldLabel}"`)
+            console.warn(`[Depop] Failed to auto-fill "${field.labelText}"`)
           }
         }
       } else {
@@ -632,18 +705,31 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 9. Click "Post" to publish ───────────────────────────────────────────
+    // Dismiss any lingering dropdown
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+
     // Dump form state for debugging
     const formState = await page.evaluate(() => {
       const desc = (document.querySelector('textarea[name="description"]') as HTMLTextAreaElement)?.value ?? '(not found)'
       const price = (document.querySelector('[data-testid="priceAmount__input"]') as HTMLInputElement)?.value ?? '(not found)'
-      const photoCount = document.querySelectorAll('img[src*="media-photos"], img[src*="s3.amazonaws"]').length
-      return { desc: desc.slice(0, 50), price, photoCount }
-    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1 }))
-    console.log(`[Depop] Pre-submit form state: photos=${formState.photoCount}, price="${formState.price}", desc="${formState.desc}"`)
+      // Count uploaded photos (look for img tags within the photo upload area)
+      const photoCount = document.querySelectorAll('[data-testid*="upload"] img, [class*="photo"] img, img[src*="media-photos"], img[src*="s3.amazonaws"], img[src*="pictures"]').length
+      // Count filled combobox fields
+      const comboboxes = Array.from(document.querySelectorAll('input[role="combobox"], input[aria-haspopup="listbox"]'))
+      const filled = comboboxes.filter(i => (i as HTMLInputElement).value?.trim()).length
+      const total = comboboxes.length
+      return { desc: desc.slice(0, 50), price, photoCount, comboboxFilled: `${filled}/${total}` }
+    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1, comboboxFilled: '?' }))
+    console.log(`[Depop] Pre-submit form state: photos=${formState.photoCount}, price="${formState.price}", desc="${formState.desc}", comboboxes=${formState.comboboxFilled}`)
 
     await page.screenshot({ path: '/tmp/depop-before-submit.png' }).catch(() => null)
+
+    // Scroll the submit button into view and click it
     const postBtn = page.locator('button[type="submit"]').first()
-    await postBtn.click()
+    await postBtn.scrollIntoViewIfNeeded().catch(() => null)
+    await page.waitForTimeout(300)
+    await postBtn.click({ timeout: 10000 })
 
     // ─── 10. Wait for redirect to the new product page ───────────────────────
     // After posting, Depop redirects to https://www.depop.com/products/{slug}/
