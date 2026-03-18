@@ -220,100 +220,90 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 3b. Select category (required) ──────────────────────────────────────
-    // Depop's autotagging AI suggests categories below the Category combobox.
-    // IMPORTANT: Avoid "Reworked / Upcycled" — it's wrong for clothing items
-    // and may not have a Size field, causing cascading form errors.
+    // IMPORTANT: Use AI-suggested pills FIRST — the category combobox creates a
+    // hierarchical dropdown with 600+ options that refuses to close and corrupts
+    // all subsequent form interactions. Pills are simple single-click selections.
     try {
       // Scroll to bring the Category section into view
       await page.locator('text=Category').first().scrollIntoViewIfNeeded().catch(() => null)
       await page.waitForTimeout(800)
 
-      const listingCat = (listing.category ?? '').toLowerCase()
-      const categoryKeywords = [
-        ['t-shirt', 'T-shirts'], ['jersey', 'T-shirts'], ['tee', 'T-shirts'],
-        ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
-        ['pant', 'Pants'], ['short', 'Shorts'], ['jean', 'Jeans'],
-        ['jacket', 'Jackets'], ['coat', 'Coats'], ['blazer', 'Blazers'],
-        ['dress', 'Dresses'], ['skirt', 'Skirts'], ['shirt', 'Shirts'],
-        ['top', 'Tops'], ['sneaker', 'Sneakers'], ['boot', 'Boots'],
-        ['hat', 'Hats'], ['bag', 'Bags'], ['shoe', 'Shoes'],
-      ]
-
       let categoryChosen = false
 
-      // Strategy 1: Use the Category combobox to search for a specific clothing category
-      const categoryInput = page.locator('#group-input, input[aria-controls="group-menu"]').first()
-      if (await categoryInput.count() > 0) {
-        // Determine search term from listing data
+      // Strategy 1: Click an AI-suggested pill (PREFERRED — no dropdown issues)
+      // Depop's autotagging shows pills like "Men / T-shirts" after photo upload.
+      const chosen = await page.evaluate(() => {
+        const badWords = ['reworked', 'upcycled', 'craft', 'handmade']
+        // Find all elements that look like category pills (contain " / ")
+        const allEls = Array.from(document.querySelectorAll('*'))
+        const pills: { text: string; el: HTMLElement }[] = []
+        for (const el of allEls) {
+          const text = (el as HTMLElement).innerText?.trim() ?? ''
+          if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
+            pills.push({ text, el: el as HTMLElement })
+          }
+        }
+        // First pass: pick a good pill (not bad words)
+        for (const pill of pills) {
+          if (badWords.some(w => pill.text.toLowerCase().includes(w))) continue
+          pill.el.click()
+          return pill.text
+        }
+        // Second pass: any pill is better than nothing
+        if (pills.length > 0) {
+          pills[0].el.click()
+          return pills[0].text + ' (only option)'
+        }
+        return null
+      })
+      if (chosen) {
+        console.log('[Depop] Category selected via AI pill:', chosen)
+        categoryChosen = true
+        await page.waitForTimeout(600)
+      }
+
+      // Strategy 2 (fallback): Use the combobox search if no pills available
+      if (!categoryChosen) {
+        const listingCat = (listing.category ?? '').toLowerCase()
+        const title = (listing.title ?? '').toLowerCase()
+        const categoryKeywords = [
+          ['t-shirt', 'T-shirts'], ['jersey', 'T-shirts'], ['tee', 'T-shirts'],
+          ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
+          ['pant', 'Pants'], ['short', 'Shorts'], ['jean', 'Jeans'],
+          ['jacket', 'Jackets'], ['coat', 'Coats'], ['blazer', 'Blazers'],
+          ['dress', 'Dresses'], ['skirt', 'Skirts'], ['shirt', 'Shirts'],
+          ['top', 'Tops'], ['sneaker', 'Sneakers'], ['boot', 'Boots'],
+          ['hat', 'Hats'], ['bag', 'Bags'], ['shoe', 'Shoes'],
+        ]
         let searchTerm = ''
         for (const [keyword, label] of categoryKeywords) {
-          if (listingCat.includes(keyword)) {
+          if (listingCat.includes(keyword) || title.includes(keyword)) {
             searchTerm = label
             break
           }
         }
-        // Also try title-based inference for synced listings with generic categories
-        if (!searchTerm) {
-          const title = (listing.title ?? '').toLowerCase()
-          for (const [keyword, label] of categoryKeywords) {
-            if (title.includes(keyword)) {
-              searchTerm = label
+        if (searchTerm) {
+          const categoryInput = page.locator('#group-input, input[aria-controls="group-menu"]').first()
+          if (await categoryInput.count() > 0) {
+            await categoryInput.click()
+            await page.waitForTimeout(500)
+            await categoryInput.type(searchTerm, { delay: 50 })
+            await page.waitForTimeout(800)
+            // Click the first good option via Playwright
+            const options = page.locator('[role="option"]')
+            const optCount = await options.count()
+            for (let i = 0; i < Math.min(optCount, 10); i++) {
+              const text = await options.nth(i).innerText().catch(() => '')
+              if (['reworked', 'upcycled', 'craft'].some(p => text.toLowerCase().includes(p))) continue
+              await options.nth(i).click()
+              console.log('[Depop] Category selected via combobox search:', text.trim())
+              categoryChosen = true
               break
             }
+            await page.waitForTimeout(500)
           }
         }
-
-        if (searchTerm) {
-          await categoryInput.click()
-          await page.waitForTimeout(500)
-          await categoryInput.type(searchTerm, { delay: 50 })
-          await page.waitForTimeout(800)
-          // Pick the first option that is NOT "Reworked" or "Upcycled"
-          // IMPORTANT: Use Playwright .click() (not evaluate) to properly trigger React close
-          const options = page.locator('[role="option"]')
-          const optCount = await options.count()
-          for (let i = 0; i < optCount; i++) {
-            const text = await options.nth(i).innerText().catch(() => '')
-            const lower = text.toLowerCase()
-            if (['reworked', 'upcycled', 'craft'].some(p => lower.includes(p))) continue
-            await options.nth(i).click()
-            console.log('[Depop] Category selected via combobox search:', text.trim())
-            categoryChosen = true
-            break
-          }
-          await page.waitForTimeout(500)
-        }
-      }
-
-      // Strategy 2: Click a Depop AI-suggested pill (but NEVER Reworked/Upcycled)
-      if (!categoryChosen) {
-        const chosen = await page.evaluate(() => {
-          const badWords = ['reworked', 'upcycled', 'craft', 'handmade', 'vintage']
-          // Find all elements that look like category pills (contain " / ")
-          const allEls = Array.from(document.querySelectorAll('*'))
-          for (const el of allEls) {
-            const text = (el as HTMLElement).innerText?.trim() ?? ''
-            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
-              if (badWords.some(w => text.toLowerCase().includes(w))) continue
-              ;(el as HTMLElement).click()
-              return text
-            }
-          }
-          // If ALL pills are bad categories, pick the first one anyway (better than nothing)
-          for (const el of allEls) {
-            const text = (el as HTMLElement).innerText?.trim() ?? ''
-            if (text.includes(' / ') && text.length < 40 && text.length > 3 && el.children.length <= 3) {
-              ;(el as HTMLElement).click()
-              return text + ' (only option)'
-            }
-          }
-          return null
-        })
-        if (chosen) {
-          console.log('[Depop] Category selected via AI pill:', chosen)
-          categoryChosen = true
-          await page.waitForTimeout(400)
-        } else {
+        if (!categoryChosen) {
           console.warn('[Depop] No category could be selected — form may fail')
         }
       }
@@ -321,22 +311,41 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Category selection failed:', e)
     }
 
-    // Dismiss any open dropdowns before next field — be aggressive
-    await page.keyboard.press('Escape')
-    await page.waitForTimeout(300)
-    // Click on a neutral area (page title/header) to fully defocus the category combobox
-    // This ensures React properly closes the dropdown overlay
-    await page.locator('body').click({ position: { x: 10, y: 10 } }).catch(() => null)
-    await page.waitForTimeout(300)
-    // Verify no dropdown is still open
-    const openOptions = await page.locator('[role="option"]').count()
-    if (openOptions > 0) {
-      console.warn(`[Depop] Dropdown still open after category (${openOptions} options) — pressing Escape again`)
+    // ─── Force-close any persistent dropdown/listbox ────────────────────────
+    // The category combobox creates a hierarchical dropdown that refuses to close
+    // via Escape/body click. Force-remove all open listbox elements from the DOM.
+    async function forceCloseDropdowns() {
       await page.keyboard.press('Escape')
-      await page.waitForTimeout(300)
-      await page.locator('body').click({ position: { x: 10, y: 10 } }).catch(() => null)
+      await page.waitForTimeout(200)
+      // Click the description textarea to move focus away from category
+      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.waitForTimeout(200)
+      // Force-hide any remaining listbox/option overlays
+      const removed = await page.evaluate(() => {
+        const listboxes = document.querySelectorAll('[role="listbox"]')
+        let count = 0
+        listboxes.forEach(lb => {
+          (lb as HTMLElement).style.display = 'none'
+          count++
+        })
+        // Also hide any open option containers
+        const optionContainers = document.querySelectorAll('[role="option"]')
+        if (optionContainers.length > 20) {
+          // This is the category mega-dropdown, hide its parent
+          const parent = optionContainers[0]?.closest('[role="listbox"], [class*="menu"], [class*="dropdown"], [class*="list"]')
+          if (parent) {
+            (parent as HTMLElement).style.display = 'none'
+            count++
+          }
+        }
+        return count
+      })
+      if (removed > 0) {
+        console.log(`[Depop] Force-closed ${removed} dropdown(s)`)
+      }
       await page.waitForTimeout(300)
     }
+    await forceCloseDropdowns()
 
     // ─── Helper: find combobox input ID by label regex ────────────────────────
     // Returns the input element's ID so we can use Playwright locator.click()
@@ -385,9 +394,16 @@ export async function createDepopListingBrowser(
       fieldName: string,
       selectFn: (options: string[]) => { index: number } | null
     ): Promise<string | null> {
-      // Dismiss any open dropdown first
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(300)
+      // Force-close any lingering dropdowns (especially the category mega-dropdown)
+      await forceCloseDropdowns()
+
+      // Re-show all listboxes (we hid them to dismiss category, but this field needs its own)
+      await page.evaluate(() => {
+        document.querySelectorAll('[role="listbox"]').forEach(lb => {
+          (lb as HTMLElement).style.display = ''
+        })
+      })
+      await page.waitForTimeout(200)
 
       // Use Playwright's native click — this triggers React's synthetic events
       const escapedId = inputId.replace(/([^\w-])/g, '\\$1')
@@ -455,33 +471,40 @@ export async function createDepopListingBrowser(
     // ─── 4. Select condition via combobox ─────────────────────────────────────
     const conditionText = CONDITION_MAP[listing.condition ?? 'good'] ?? 'Good'
     try {
+      await forceCloseDropdowns()
       const conditionInputId = await findComboboxByLabel(/^condition\b/i)
       if (conditionInputId) {
-        // For condition, we WANT to select from condition values, so override sanity check
-        await page.keyboard.press('Escape')
-        await page.waitForTimeout(300)
+        // Re-show listboxes so condition can open its own dropdown
+        await page.evaluate(() => {
+          document.querySelectorAll('[role="listbox"]').forEach(lb => {
+            (lb as HTMLElement).style.display = ''
+          })
+        })
+        await page.waitForTimeout(200)
+
         const escapedId = conditionInputId.replace(/([^\w-])/g, '\\$1')
         await page.locator(`#${escapedId}`).scrollIntoViewIfNeeded().catch(() => null)
         await page.locator(`#${escapedId}`).click()
         await page.waitForTimeout(800)
 
-        const picked = await page.evaluate((target) => {
-          const options = Array.from(document.querySelectorAll('[role="option"]'))
-          for (const o of options) {
-            const text = (o as HTMLElement).innerText?.trim() ?? ''
-            if (text.toLowerCase().includes(target.toLowerCase())) {
-              ;(o as HTMLElement).click()
-              return text
-            }
+        // Use Playwright locator to click condition option (triggers React properly)
+        const options = page.locator('[role="option"]')
+        const optCount = await options.count()
+        let conditionPicked = false
+        for (let i = 0; i < Math.min(optCount, 10); i++) {
+          const text = await options.nth(i).innerText().catch(() => '')
+          if (text.toLowerCase().includes(conditionText.toLowerCase())) {
+            await options.nth(i).click()
+            console.log('[Depop] Condition selected:', text.trim())
+            conditionPicked = true
+            break
           }
-          if (options.length > 0) {
-            const text = (options[0] as HTMLElement).innerText?.trim() ?? ''
-            ;(options[0] as HTMLElement).click()
-            return text + ' (fallback)'
-          }
-          return null
-        }, conditionText)
-        console.log('[Depop] Condition selected:', picked)
+        }
+        if (!conditionPicked && optCount > 0) {
+          await options.first().click()
+          const text = await options.first().innerText().catch(() => '?')
+          console.log('[Depop] Condition selected (fallback):', text.trim())
+        }
       } else {
         console.warn('[Depop] Condition field not found on page')
       }
@@ -489,9 +512,8 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Condition selection failed:', e)
     }
 
-    // Dismiss dropdown before Size
-    await page.keyboard.press('Escape')
-    await page.waitForTimeout(400)
+    // Force-close before Size
+    await forceCloseDropdowns()
 
     // ─── 5. Select size (required when category has sizes) ───────────────────
     // Uses Playwright native .click() to open dropdown (page.evaluate clicks don't trigger React)
