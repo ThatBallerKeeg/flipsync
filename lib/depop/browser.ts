@@ -269,22 +269,19 @@ export async function createDepopListingBrowser(
           await categoryInput.type(searchTerm, { delay: 50 })
           await page.waitForTimeout(800)
           // Pick the first option that is NOT "Reworked" or "Upcycled"
-          const picked = await page.evaluate((badPatterns) => {
-            const options = Array.from(document.querySelectorAll('[role="option"]'))
-            for (const o of options) {
-              const text = (o as HTMLElement).innerText?.trim() ?? ''
-              if (badPatterns.some((p: string) => text.toLowerCase().includes(p))) continue
-              ;(o as HTMLElement).click()
-              return text
-            }
-            return null
-          }, ['reworked', 'upcycled', 'craft'])
-          if (picked) {
-            console.log('[Depop] Category selected via combobox search:', picked)
+          // IMPORTANT: Use Playwright .click() (not evaluate) to properly trigger React close
+          const options = page.locator('[role="option"]')
+          const optCount = await options.count()
+          for (let i = 0; i < optCount; i++) {
+            const text = await options.nth(i).innerText().catch(() => '')
+            const lower = text.toLowerCase()
+            if (['reworked', 'upcycled', 'craft'].some(p => lower.includes(p))) continue
+            await options.nth(i).click()
+            console.log('[Depop] Category selected via combobox search:', text.trim())
             categoryChosen = true
+            break
           }
-          await page.keyboard.press('Escape')
-          await page.waitForTimeout(300)
+          await page.waitForTimeout(500)
         }
       }
 
@@ -324,9 +321,22 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Category selection failed:', e)
     }
 
-    // Dismiss any open dropdowns before next field
+    // Dismiss any open dropdowns before next field — be aggressive
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
+    // Click on a neutral area (page title/header) to fully defocus the category combobox
+    // This ensures React properly closes the dropdown overlay
+    await page.locator('body').click({ position: { x: 10, y: 10 } }).catch(() => null)
+    await page.waitForTimeout(300)
+    // Verify no dropdown is still open
+    const openOptions = await page.locator('[role="option"]').count()
+    if (openOptions > 0) {
+      console.warn(`[Depop] Dropdown still open after category (${openOptions} options) — pressing Escape again`)
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(300)
+      await page.locator('body').click({ position: { x: 10, y: 10 } }).catch(() => null)
+      await page.waitForTimeout(300)
+    }
 
     // ─── Helper: find combobox input ID by label regex ────────────────────────
     // Returns the input element's ID so we can use Playwright locator.click()
@@ -336,10 +346,19 @@ export async function createDepopListingBrowser(
         const labels = Array.from(document.querySelectorAll('label'))
         for (const label of labels) {
           const text = label.textContent?.trim() ?? ''
-          if (new RegExp(pattern).test(text) && (!exclude || !new RegExp(exclude).test(text))) {
+          // CRITICAL: use 'i' flag for case-insensitive matching
+          if (new RegExp(pattern, 'i').test(text) && (!exclude || !new RegExp(exclude, 'i').test(text))) {
             const forId = label.getAttribute('for')
             const input = forId ? document.getElementById(forId) : label.querySelector('input')
             if (input?.id) return input.id
+          }
+        }
+        // Fallback: also check aria-label on inputs directly
+        const inputs = Array.from(document.querySelectorAll('input[role="combobox"], input[aria-haspopup="listbox"]'))
+        for (const input of inputs) {
+          const ariaLabel = input.getAttribute('aria-label') ?? ''
+          if (new RegExp(pattern, 'i').test(ariaLabel) && (!exclude || !new RegExp(exclude, 'i').test(ariaLabel))) {
+            if ((input as HTMLElement).id) return (input as HTMLElement).id
           }
         }
         return null
@@ -408,16 +427,26 @@ export async function createDepopListingBrowser(
         return null
       }
 
-      // Click the option via evaluate (options may not be "visible" to Playwright)
-      const picked = await page.evaluate((idx) => {
-        const options = Array.from(document.querySelectorAll('[role="option"]'))
-        if (idx < options.length) {
-          const text = (options[idx] as HTMLElement).innerText?.trim() ?? ''
-          ;(options[idx] as HTMLElement).click()
-          return text
-        }
-        return null
-      }, selection.index)
+      // Click option via Playwright locator first (triggers React properly),
+      // fall back to evaluate if Playwright can't click it
+      const optionLocator = page.locator('[role="option"]').nth(selection.index)
+      let picked: string | null = null
+      try {
+        picked = await optionLocator.innerText({ timeout: 2000 })
+        await optionLocator.click({ timeout: 3000 })
+        picked = picked?.trim() ?? null
+      } catch {
+        // Fallback: click via evaluate (option may be obscured/not "visible")
+        picked = await page.evaluate((idx) => {
+          const options = Array.from(document.querySelectorAll('[role="option"]'))
+          if (idx < options.length) {
+            const text = (options[idx] as HTMLElement).innerText?.trim() ?? ''
+            ;(options[idx] as HTMLElement).click()
+            return text
+          }
+          return null
+        }, selection.index)
+      }
 
       await page.waitForTimeout(300)
       return picked
