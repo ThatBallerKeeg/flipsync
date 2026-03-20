@@ -11,14 +11,34 @@ export async function GET() {
   const sales = await prisma.sale.findMany({
     include: { listing: { select: { title: true, photos: true, createdAt: true } } },
   })
+
+  // Fallback: if no Sale records exist, derive revenue from SOLD listings
+  const soldListings = await prisma.listing.findMany({
+    where: { status: 'SOLD' },
+    select: { id: true, price: true, createdAt: true, updatedAt: true, platforms: { select: { platform: true } } },
+  })
+  const hasSaleRecords = sales.length > 0
+
   let totalRevenue = 0
-  for (const sale of sales) totalRevenue += sale.salePrice
+  if (hasSaleRecords) {
+    for (const sale of sales) totalRevenue += sale.salePrice
+  } else {
+    for (const listing of soldListings) totalRevenue += listing.price
+  }
 
   // Last 30 days
-  const recentSales = sales.filter((s) => s.soldAt >= thirtyDaysAgo)
-  const itemsSold30d = recentSales.length
+  let itemsSold30d: number
   let recentRevenue = 0
-  for (const sale of recentSales) recentRevenue += sale.salePrice
+  if (hasSaleRecords) {
+    const recentSales = sales.filter((s) => s.soldAt >= thirtyDaysAgo)
+    itemsSold30d = recentSales.length
+    for (const sale of recentSales) recentRevenue += sale.salePrice
+  } else {
+    // Use updatedAt as approximate sold date for listings without Sale records
+    const recentSold = soldListings.filter((l) => l.updatedAt >= thirtyDaysAgo)
+    itemsSold30d = recentSold.length
+    for (const listing of recentSold) recentRevenue += listing.price
+  }
   const avgSalePrice30d = itemsSold30d ? recentRevenue / itemsSold30d : 0
 
   // Listing counts (total + per-platform active counts for sell-through)
@@ -30,41 +50,78 @@ export async function GET() {
   ])
   const sellThroughRate = activeCount + soldCount > 0 ? soldCount / (activeCount + soldCount) : 0
 
-  // Per-platform active listing counts for platform-specific sell-through
-  const [ebayActiveCount, depopActiveCount] = await Promise.all([
+  // Per-platform counts for platform-specific sell-through
+  const [ebayActiveCount, depopActiveCount, ebaySoldCount, depopSoldCount] = await Promise.all([
     prisma.listingPlatform.count({
       where: { platform: 'EBAY', listing: { status: 'ACTIVE' } },
     }),
     prisma.listingPlatform.count({
       where: { platform: 'DEPOP', listing: { status: 'ACTIVE' } },
     }),
+    prisma.listingPlatform.count({
+      where: { platform: 'EBAY', listing: { status: 'SOLD' } },
+    }),
+    prisma.listingPlatform.count({
+      where: { platform: 'DEPOP', listing: { status: 'SOLD' } },
+    }),
   ])
 
-  // Revenue by week from ACTUAL SALES (last 90 days)
-  const recentAllSales = sales.filter((s) => s.soldAt >= ninetyDaysAgo)
+  // Revenue by week (last 90 days)
   const weekMap = new Map<string, { ebay: number; depop: number }>()
-  for (const sale of recentAllSales) {
-    const weekStart = getWeekStart(sale.soldAt)
-    const key = weekStart.toISOString().split('T')[0]
-    if (!weekMap.has(key)) weekMap.set(key, { ebay: 0, depop: 0 })
-    const entry = weekMap.get(key)!
-    if (sale.platform === 'EBAY') entry.ebay += sale.salePrice
-    else entry.depop += sale.salePrice
+  if (hasSaleRecords) {
+    const recentAllSales = sales.filter((s) => s.soldAt >= ninetyDaysAgo)
+    for (const sale of recentAllSales) {
+      const weekStart = getWeekStart(sale.soldAt)
+      const key = weekStart.toISOString().split('T')[0]
+      if (!weekMap.has(key)) weekMap.set(key, { ebay: 0, depop: 0 })
+      const entry = weekMap.get(key)!
+      if (sale.platform === 'EBAY') entry.ebay += sale.salePrice
+      else entry.depop += sale.salePrice
+    }
+  } else {
+    // Derive from sold listings using updatedAt as approximate sale date
+    const recentSold = soldListings.filter((l) => l.updatedAt >= ninetyDaysAgo)
+    for (const listing of recentSold) {
+      const weekStart = getWeekStart(listing.updatedAt)
+      const key = weekStart.toISOString().split('T')[0]
+      if (!weekMap.has(key)) weekMap.set(key, { ebay: 0, depop: 0 })
+      const entry = weekMap.get(key)!
+      const platform = listing.platforms[0]?.platform
+      if (platform === 'EBAY') entry.ebay += listing.price
+      else entry.depop += listing.price
+    }
   }
 
-  // Platform comparison from sales
-  const ebaySales = sales.filter((s) => s.platform === 'EBAY')
-  const depopSales = sales.filter((s) => s.platform === 'DEPOP')
-
-  // Calculate avg days to sell per platform
-  function avgDaysToSell(platformSales: typeof sales): number {
-    const withDays = platformSales.filter((s) => s.listing?.createdAt)
-    if (!withDays.length) return 0
-    let totalDays = 0
-    for (const s of withDays) {
-      totalDays += Math.max(1, Math.floor((s.soldAt.getTime() - s.listing.createdAt.getTime()) / (24 * 60 * 60 * 1000)))
+  // Platform comparison
+  type SaleItem = { price: number; createdAt: Date; soldAt: Date; platform: string }
+  let ebaySaleItems: SaleItem[] = []
+  let depopSaleItems: SaleItem[] = []
+  if (hasSaleRecords) {
+    ebaySaleItems = sales.filter((s) => s.platform === 'EBAY').map((s) => ({
+      price: s.salePrice, createdAt: s.listing.createdAt, soldAt: s.soldAt, platform: 'EBAY',
+    }))
+    depopSaleItems = sales.filter((s) => s.platform === 'DEPOP').map((s) => ({
+      price: s.salePrice, createdAt: s.listing.createdAt, soldAt: s.soldAt, platform: 'DEPOP',
+    }))
+  } else {
+    for (const listing of soldListings) {
+      const item = {
+        price: listing.price, createdAt: listing.createdAt, soldAt: listing.updatedAt,
+        platform: listing.platforms[0]?.platform ?? 'DEPOP',
+      }
+      if (item.platform === 'EBAY') ebaySaleItems.push(item)
+      else depopSaleItems.push(item)
     }
-    return Math.round(totalDays / withDays.length)
+  }
+
+  // Calculate avg days to sell
+  function avgDaysToSell(items: SaleItem[]): number {
+    if (!items.length) return 0
+    let totalDays = 0
+    for (const s of items) {
+      totalDays += Math.max(1, Math.floor((s.soldAt.getTime() - s.createdAt.getTime()) / (24 * 60 * 60 * 1000)))
+    }
+    return Math.round(totalDays / items.length)
   }
 
   // Top listings by views (7 days) — fall back to recently updated active listings
@@ -110,8 +167,15 @@ export async function GET() {
     }
   })
 
-  const ebayTotalListings = ebayActiveCount + ebaySales.length
-  const depopTotalListings = depopActiveCount + depopSales.length
+  const ebayTotalListings = ebayActiveCount + ebaySoldCount
+  const depopTotalListings = depopActiveCount + depopSoldCount
+
+  function avgPrice(items: SaleItem[]): number {
+    if (!items.length) return 0
+    let t = 0
+    for (const s of items) t += s.price
+    return t / items.length
+  }
 
   const data: AnalyticsData = {
     totalRevenue,
@@ -127,14 +191,14 @@ export async function GET() {
       .map(([week, vals]) => ({ week, ...vals })),
     platformComparison: {
       ebay: {
-        avgPrice: (() => { let t = 0; for (const s of ebaySales) t += s.salePrice; return ebaySales.length ? t / ebaySales.length : 0 })(),
-        avgDaysToSell: avgDaysToSell(ebaySales),
-        sellThrough: ebayTotalListings > 0 ? ebaySales.length / ebayTotalListings : 0,
+        avgPrice: avgPrice(ebaySaleItems),
+        avgDaysToSell: avgDaysToSell(ebaySaleItems),
+        sellThrough: ebayTotalListings > 0 ? ebaySoldCount / ebayTotalListings : 0,
       },
       depop: {
-        avgPrice: (() => { let t = 0; for (const s of depopSales) t += s.salePrice; return depopSales.length ? t / depopSales.length : 0 })(),
-        avgDaysToSell: avgDaysToSell(depopSales),
-        sellThrough: depopTotalListings > 0 ? depopSales.length / depopTotalListings : 0,
+        avgPrice: avgPrice(depopSaleItems),
+        avgDaysToSell: avgDaysToSell(depopSaleItems),
+        sellThrough: depopTotalListings > 0 ? depopSoldCount / depopTotalListings : 0,
       },
     },
     topListings: topListingsWithViews,

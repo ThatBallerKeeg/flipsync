@@ -307,44 +307,42 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Category selection failed:', e)
     }
 
-    // ─── Force-close any persistent dropdown/listbox ────────────────────────
-    // The category combobox creates a hierarchical dropdown that refuses to close
-    // via Escape/body click. REMOVE all listbox elements from the DOM entirely
-    // so React creates fresh ones when the next field is clicked.
-    async function forceCloseDropdowns() {
+    // ─── Force-close the CATEGORY dropdown only ─────────────────────────────
+    // The category combobox creates a 600+ option hierarchical dropdown that
+    // refuses to close via Escape/body click. We hide ONLY this specific dropdown
+    // using display:none. We must NOT remove or hide other listboxes because
+    // Depop's React app reuses a shared listbox element across all comboboxes.
+    async function forceCloseCategoryDropdown() {
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
-      // Click the description textarea to move focus away
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(200)
-      // REMOVE (not hide) all listbox elements from the DOM
-      const removed = await page.evaluate(() => {
-        const listboxes = document.querySelectorAll('[role="listbox"]')
+      const hidden = await page.evaluate(() => {
         let count = 0
-        listboxes.forEach(lb => {
-          lb.remove()
+        // Target category-specific dropdown by ID
+        const groupMenu = document.getElementById('group-menu')
+        if (groupMenu) {
+          groupMenu.style.display = 'none'
+          groupMenu.setAttribute('data-force-hidden', 'true')
           count++
-        })
-        // Also remove any orphaned option containers
-        const optionContainers = document.querySelectorAll('[role="option"]')
-        optionContainers.forEach(opt => {
-          const parent = opt.closest('[role="listbox"], [class*="menu"], [class*="dropdown"], [class*="list"]')
-          if (parent) {
-            parent.remove()
-            count++
-          } else {
-            opt.remove()
+        }
+        // Also hide any listbox with 20+ options (category mega-dropdown)
+        document.querySelectorAll('[role="listbox"]').forEach(lb => {
+          const optCount = lb.querySelectorAll('[role="option"]').length
+          if (optCount > 20) {
+            (lb as HTMLElement).style.display = 'none';
+            (lb as HTMLElement).setAttribute('data-force-hidden', 'true')
             count++
           }
         })
         return count
       })
-      if (removed > 0) {
-        console.log(`[Depop] Force-removed ${removed} dropdown element(s) from DOM`)
+      if (hidden > 0) {
+        console.log(`[Depop] Force-hid ${hidden} category dropdown(s)`)
       }
       await page.waitForTimeout(300)
     }
-    await forceCloseDropdowns()
+    await forceCloseCategoryDropdown()
 
     // ─── Helper: find combobox input ID by label regex ────────────────────────
     // Returns the input element's ID so we can use Playwright locator.click()
@@ -388,14 +386,27 @@ export async function createDepopListingBrowser(
 
     // Helper: click a combobox input using Playwright's native click (triggers React events)
     // then select from the dropdown. Returns the selected option text, or null if failed.
+    //
+    // IMPORTANT: Does NOT remove/hide listboxes globally. Depop reuses a shared
+    // listbox element across all comboboxes — removing it breaks ALL fields.
+    // Instead, we: Escape → blur → click input → let React open correct dropdown.
     async function clickComboboxAndSelect(
       inputId: string,
       fieldName: string,
       selectFn: (options: string[]) => { index: number } | null
     ): Promise<string | null> {
-      // Force-close any lingering dropdowns — removes them from DOM entirely.
-      // React will create a fresh listbox when this field's input is clicked.
-      await forceCloseDropdowns()
+      // Close any open dropdown via React's own mechanisms (Escape + blur)
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(200)
+      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.waitForTimeout(300)
+
+      // Re-hide category dropdown in case Escape re-opened it
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-force-hidden="true"]').forEach(el => {
+          (el as HTMLElement).style.display = 'none'
+        })
+      })
 
       // Use Playwright's native click — this triggers React's synthetic events
       const escapedId = inputId.replace(/([^\w-])/g, '\\$1')
@@ -409,9 +420,13 @@ export async function createDepopListingBrowser(
       await inputLocator.click()
       await page.waitForTimeout(800)
 
-      // Get available options
+      // Get available options (exclude force-hidden category dropdown)
       const availableOptions = await page.evaluate(() => {
         return Array.from(document.querySelectorAll('[role="option"]'))
+          .filter(o => {
+            const listbox = o.closest('[data-force-hidden="true"]')
+            return !listbox
+          })
           .map(o => (o as HTMLElement).innerText?.trim() ?? '')
       })
 
@@ -435,18 +450,18 @@ export async function createDepopListingBrowser(
         return null
       }
 
-      // Click option via Playwright locator first (triggers React properly),
-      // fall back to evaluate if Playwright can't click it
-      const optionLocator = page.locator('[role="option"]').nth(selection.index)
+      // Click option via Playwright locator (excluding force-hidden category options)
+      const optionLocator = page.locator('[role="option"]:not([data-force-hidden] [role="option"])').nth(selection.index)
       let picked: string | null = null
       try {
         picked = await optionLocator.innerText({ timeout: 2000 })
         await optionLocator.click({ timeout: 3000 })
         picked = picked?.trim() ?? null
       } catch {
-        // Fallback: click via evaluate (option may be obscured/not "visible")
+        // Fallback: click via evaluate (option may be obscured)
         picked = await page.evaluate((idx) => {
           const options = Array.from(document.querySelectorAll('[role="option"]'))
+            .filter(o => !o.closest('[data-force-hidden="true"]'))
           if (idx < options.length) {
             const text = (options[idx] as HTMLElement).innerText?.trim() ?? ''
             ;(options[idx] as HTMLElement).click()
