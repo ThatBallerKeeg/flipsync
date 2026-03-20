@@ -243,17 +243,13 @@ export async function createDepopListingBrowser(
             pills.push({ text, el: el as HTMLElement })
           }
         }
-        // First pass: pick a good pill (not bad words)
+        // Pick a good pill (not bad words) — do NOT fall back to bad pills
         for (const pill of pills) {
           if (badWords.some(w => pill.text.toLowerCase().includes(w))) continue
           pill.el.click()
           return pill.text
         }
-        // Second pass: any pill is better than nothing
-        if (pills.length > 0) {
-          pills[0].el.click()
-          return pills[0].text + ' (only option)'
-        }
+        // All pills are bad (reworked/upcycled etc) — skip, use combobox fallback
         return null
       })
       if (chosen) {
@@ -313,35 +309,38 @@ export async function createDepopListingBrowser(
 
     // ─── Force-close any persistent dropdown/listbox ────────────────────────
     // The category combobox creates a hierarchical dropdown that refuses to close
-    // via Escape/body click. Force-remove all open listbox elements from the DOM.
+    // via Escape/body click. REMOVE all listbox elements from the DOM entirely
+    // so React creates fresh ones when the next field is clicked.
     async function forceCloseDropdowns() {
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
-      // Click the description textarea to move focus away from category
+      // Click the description textarea to move focus away
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(200)
-      // Force-hide any remaining listbox/option overlays
+      // REMOVE (not hide) all listbox elements from the DOM
       const removed = await page.evaluate(() => {
         const listboxes = document.querySelectorAll('[role="listbox"]')
         let count = 0
         listboxes.forEach(lb => {
-          (lb as HTMLElement).style.display = 'none'
+          lb.remove()
           count++
         })
-        // Also hide any open option containers
+        // Also remove any orphaned option containers
         const optionContainers = document.querySelectorAll('[role="option"]')
-        if (optionContainers.length > 20) {
-          // This is the category mega-dropdown, hide its parent
-          const parent = optionContainers[0]?.closest('[role="listbox"], [class*="menu"], [class*="dropdown"], [class*="list"]')
+        optionContainers.forEach(opt => {
+          const parent = opt.closest('[role="listbox"], [class*="menu"], [class*="dropdown"], [class*="list"]')
           if (parent) {
-            (parent as HTMLElement).style.display = 'none'
+            parent.remove()
+            count++
+          } else {
+            opt.remove()
             count++
           }
-        }
+        })
         return count
       })
       if (removed > 0) {
-        console.log(`[Depop] Force-closed ${removed} dropdown(s)`)
+        console.log(`[Depop] Force-removed ${removed} dropdown element(s) from DOM`)
       }
       await page.waitForTimeout(300)
     }
@@ -376,7 +375,7 @@ export async function createDepopListingBrowser(
 
     // Helper: detect if dropdown options are wrong (category subcategories, not the field's own options)
     const CATEGORY_SUBCATEGORIES = /^(t-shirts?|hoodies?|sweatshirts?|jumpers?|cardigans?|shirts?|polo shirts?|blouses?|crop tops?|vests?|corsets?|bodysuits?|jeans?|sweatpants?|shorts?|pants?|jackets?|coats?|blazers?|dresses?|skirts?|sneakers?|boots?|shoes?|hats?|bags?|tops?|other)$/i
-    const CONDITION_VALUES = /^(new with tags|like new|good|fair|poor)$/i
+    const CONDITION_VALUES = /^(new with tags|brand new|like new|good|fair|poor|used\s*-\s*(excellent|good|fair))$/i
 
     function looksLikeBadOptions(options: string[]): string | null {
       if (options.length === 0) return 'empty'
@@ -394,16 +393,9 @@ export async function createDepopListingBrowser(
       fieldName: string,
       selectFn: (options: string[]) => { index: number } | null
     ): Promise<string | null> {
-      // Force-close any lingering dropdowns (especially the category mega-dropdown)
+      // Force-close any lingering dropdowns — removes them from DOM entirely.
+      // React will create a fresh listbox when this field's input is clicked.
       await forceCloseDropdowns()
-
-      // Re-show all listboxes (we hid them to dismiss category, but this field needs its own)
-      await page.evaluate(() => {
-        document.querySelectorAll('[role="listbox"]').forEach(lb => {
-          (lb as HTMLElement).style.display = ''
-        })
-      })
-      await page.waitForTimeout(200)
 
       // Use Playwright's native click — this triggers React's synthetic events
       const escapedId = inputId.replace(/([^\w-])/g, '\\$1')
@@ -471,39 +463,19 @@ export async function createDepopListingBrowser(
     // ─── 4. Select condition via combobox ─────────────────────────────────────
     const conditionText = CONDITION_MAP[listing.condition ?? 'good'] ?? 'Good'
     try {
-      await forceCloseDropdowns()
       const conditionInputId = await findComboboxByLabel(/^condition\b/i)
       if (conditionInputId) {
-        // Re-show listboxes so condition can open its own dropdown
-        await page.evaluate(() => {
-          document.querySelectorAll('[role="listbox"]').forEach(lb => {
-            (lb as HTMLElement).style.display = ''
-          })
+        const picked = await clickComboboxAndSelect(conditionInputId, 'Condition', (options) => {
+          // Match the desired condition text
+          const idx = options.findIndex(o => o.toLowerCase().includes(conditionText.toLowerCase()))
+          if (idx >= 0) return { index: idx }
+          // Fallback: first option
+          return options.length > 0 ? { index: 0 } : null
         })
-        await page.waitForTimeout(200)
-
-        const escapedId = conditionInputId.replace(/([^\w-])/g, '\\$1')
-        await page.locator(`#${escapedId}`).scrollIntoViewIfNeeded().catch(() => null)
-        await page.locator(`#${escapedId}`).click()
-        await page.waitForTimeout(800)
-
-        // Use Playwright locator to click condition option (triggers React properly)
-        const options = page.locator('[role="option"]')
-        const optCount = await options.count()
-        let conditionPicked = false
-        for (let i = 0; i < Math.min(optCount, 10); i++) {
-          const text = await options.nth(i).innerText().catch(() => '')
-          if (text.toLowerCase().includes(conditionText.toLowerCase())) {
-            await options.nth(i).click()
-            console.log('[Depop] Condition selected:', text.trim())
-            conditionPicked = true
-            break
-          }
-        }
-        if (!conditionPicked && optCount > 0) {
-          await options.first().click()
-          const text = await options.first().innerText().catch(() => '?')
-          console.log('[Depop] Condition selected (fallback):', text.trim())
+        if (picked) {
+          console.log('[Depop] Condition selected:', picked)
+        } else {
+          console.warn('[Depop] Condition NOT selected — wrong dropdown or no options')
         }
       } else {
         console.warn('[Depop] Condition field not found on page')
@@ -511,9 +483,6 @@ export async function createDepopListingBrowser(
     } catch (e) {
       console.warn('[Depop] Condition selection failed:', e)
     }
-
-    // Force-close before Size
-    await forceCloseDropdowns()
 
     // ─── 5. Select size (required when category has sizes) ───────────────────
     // Uses Playwright native .click() to open dropdown (page.evaluate clicks don't trigger React)
