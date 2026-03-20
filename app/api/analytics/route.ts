@@ -7,9 +7,9 @@ export async function GET() {
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
   const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
 
-  // Total revenue
+  // All sales with their listing for days-to-sell calculation
   const sales = await prisma.sale.findMany({
-    include: { listing: { select: { title: true, photos: true } } },
+    include: { listing: { select: { title: true, photos: true, createdAt: true } } },
   })
   let totalRevenue = 0
   for (const sale of sales) totalRevenue += sale.salePrice
@@ -21,7 +21,7 @@ export async function GET() {
   for (const sale of recentSales) recentRevenue += sale.salePrice
   const avgSalePrice30d = itemsSold30d ? recentRevenue / itemsSold30d : 0
 
-  // Listing counts
+  // Listing counts (total + per-platform active counts for sell-through)
   const [activeCount, soldCount, draftCount, totalCount] = await Promise.all([
     prisma.listing.count({ where: { status: 'ACTIVE' } }),
     prisma.listing.count({ where: { status: 'SOLD' } }),
@@ -30,25 +30,42 @@ export async function GET() {
   ])
   const sellThroughRate = activeCount + soldCount > 0 ? soldCount / (activeCount + soldCount) : 0
 
-  // Revenue by week (last 90 days)
-  const analytics = await prisma.listingAnalytics.findMany({
-    where: { date: { gte: ninetyDaysAgo } },
-  })
+  // Per-platform active listing counts for platform-specific sell-through
+  const [ebayActiveCount, depopActiveCount] = await Promise.all([
+    prisma.listingPlatform.count({
+      where: { platform: 'EBAY', listing: { status: 'ACTIVE' } },
+    }),
+    prisma.listingPlatform.count({
+      where: { platform: 'DEPOP', listing: { status: 'ACTIVE' } },
+    }),
+  ])
 
-  // Group analytics by week and platform
+  // Revenue by week from ACTUAL SALES (last 90 days)
+  const recentAllSales = sales.filter((s) => s.soldAt >= ninetyDaysAgo)
   const weekMap = new Map<string, { ebay: number; depop: number }>()
-  for (const a of analytics) {
-    const weekStart = getWeekStart(a.date)
+  for (const sale of recentAllSales) {
+    const weekStart = getWeekStart(sale.soldAt)
     const key = weekStart.toISOString().split('T')[0]
     if (!weekMap.has(key)) weekMap.set(key, { ebay: 0, depop: 0 })
     const entry = weekMap.get(key)!
-    if (a.platform === 'EBAY') entry.ebay += a.views
-    else entry.depop += a.views
+    if (sale.platform === 'EBAY') entry.ebay += sale.salePrice
+    else entry.depop += sale.salePrice
   }
 
   // Platform comparison from sales
   const ebaySales = sales.filter((s) => s.platform === 'EBAY')
   const depopSales = sales.filter((s) => s.platform === 'DEPOP')
+
+  // Calculate avg days to sell per platform
+  function avgDaysToSell(platformSales: typeof sales): number {
+    const withDays = platformSales.filter((s) => s.listing?.createdAt)
+    if (!withDays.length) return 0
+    let totalDays = 0
+    for (const s of withDays) {
+      totalDays += Math.max(1, Math.floor((s.soldAt.getTime() - s.listing.createdAt.getTime()) / (24 * 60 * 60 * 1000)))
+    }
+    return Math.round(totalDays / withDays.length)
+  }
 
   // Top listings by views (7 days) — fall back to recently updated active listings
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -93,6 +110,9 @@ export async function GET() {
     }
   })
 
+  const ebayTotalListings = ebayActiveCount + ebaySales.length
+  const depopTotalListings = depopActiveCount + depopSales.length
+
   const data: AnalyticsData = {
     totalRevenue,
     itemsSold30d,
@@ -108,13 +128,13 @@ export async function GET() {
     platformComparison: {
       ebay: {
         avgPrice: (() => { let t = 0; for (const s of ebaySales) t += s.salePrice; return ebaySales.length ? t / ebaySales.length : 0 })(),
-        avgDaysToSell: 0,
-        sellThrough: activeCount ? ebaySales.length / (activeCount + ebaySales.length) : 0,
+        avgDaysToSell: avgDaysToSell(ebaySales),
+        sellThrough: ebayTotalListings > 0 ? ebaySales.length / ebayTotalListings : 0,
       },
       depop: {
         avgPrice: (() => { let t = 0; for (const s of depopSales) t += s.salePrice; return depopSales.length ? t / depopSales.length : 0 })(),
-        avgDaysToSell: 0,
-        sellThrough: activeCount ? depopSales.length / (activeCount + depopSales.length) : 0,
+        avgDaysToSell: avgDaysToSell(depopSales),
+        sellThrough: depopTotalListings > 0 ? depopSales.length / depopTotalListings : 0,
       },
     },
     topListings: topListingsWithViews,
