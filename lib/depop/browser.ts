@@ -375,9 +375,10 @@ export async function createDepopListingBrowser(
     const CATEGORY_SUBCATEGORIES = /^(t-shirts?|hoodies?|sweatshirts?|jumpers?|cardigans?|shirts?|polo shirts?|blouses?|crop tops?|vests?|corsets?|bodysuits?|jeans?|sweatpants?|shorts?|pants?|jackets?|coats?|blazers?|dresses?|skirts?|sneakers?|boots?|shoes?|hats?|bags?|tops?|other)$/i
     const CONDITION_VALUES = /^(new with tags|brand new|like new|good|fair|poor|used\s*-\s*(excellent|good|fair))$/i
 
-    function looksLikeBadOptions(options: string[]): string | null {
+    function looksLikeBadOptions(options: string[], currentField: string): string | null {
       if (options.length === 0) return 'empty'
-      if (options.some(o => CONDITION_VALUES.test(o))) return 'condition'
+      // Condition values are CORRECT when filling the Condition field
+      if (!/condition/i.test(currentField) && options.some(o => CONDITION_VALUES.test(o))) return 'condition'
       // If 3+ options match category names, it's the category dropdown leaking
       const catMatches = options.filter(o => CATEGORY_SUBCATEGORIES.test(o)).length
       if (catMatches >= 3) return 'category'
@@ -430,8 +431,8 @@ export async function createDepopListingBrowser(
           .map(o => (o as HTMLElement).innerText?.trim() ?? '')
       })
 
-      // Sanity check: detect if wrong dropdown opened
-      const badType = looksLikeBadOptions(availableOptions)
+      // Sanity check: detect if wrong dropdown opened (context-aware)
+      const badType = looksLikeBadOptions(availableOptions, fieldName)
       if (badType) {
         console.warn(`[Depop] ${fieldName}: dropdown shows ${badType} values instead of ${fieldName} options: [${availableOptions.slice(0, 5).join(', ')}]`)
         await page.keyboard.press('Escape')
