@@ -307,11 +307,10 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Category selection failed:', e)
     }
 
-    // ─── Force-close the CATEGORY dropdown only ─────────────────────────────
-    // The category combobox creates a 600+ option hierarchical dropdown that
-    // refuses to close via Escape/body click. We hide ONLY this specific dropdown
-    // using display:none. We must NOT remove or hide other listboxes because
-    // Depop's React app reuses a shared listbox element across all comboboxes.
+    // ─── Force-close the CATEGORY dropdown ──────────────────────────────────
+    // The category combobox creates a multi-level dropdown (main + subcategory).
+    // Hide ALL visible listboxes after category — they are ALL category-related.
+    // React will create a fresh listbox when the next combobox (Condition) opens.
     async function forceCloseCategoryDropdown() {
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
@@ -319,22 +318,20 @@ export async function createDepopListingBrowser(
       await page.waitForTimeout(200)
       const hidden = await page.evaluate(() => {
         let count = 0
-        // Target category-specific dropdown by ID
+        // Hide ALL listboxes — after category selection they are all category-related
+        // (main group-menu + subcategory levels like "T-shirts, Hoodies, ...")
+        document.querySelectorAll('[role="listbox"]').forEach(lb => {
+          (lb as HTMLElement).style.display = 'none';
+          (lb as HTMLElement).setAttribute('data-force-hidden', 'true')
+          count++
+        })
+        // Also explicitly target #group-menu
         const groupMenu = document.getElementById('group-menu')
-        if (groupMenu) {
+        if (groupMenu && groupMenu.style.display !== 'none') {
           groupMenu.style.display = 'none'
           groupMenu.setAttribute('data-force-hidden', 'true')
           count++
         }
-        // Also hide any listbox with 20+ options (category mega-dropdown)
-        document.querySelectorAll('[role="listbox"]').forEach(lb => {
-          const optCount = lb.querySelectorAll('[role="option"]').length
-          if (optCount > 20) {
-            (lb as HTMLElement).style.display = 'none';
-            (lb as HTMLElement).setAttribute('data-force-hidden', 'true')
-            count++
-          }
-        })
         return count
       })
       if (hidden > 0) {
@@ -380,45 +377,30 @@ export async function createDepopListingBrowser(
     // that field's options. Clicking a different input via Playwright doesn't
     // always trigger React to switch the listbox to the new field's options.
     //
-    // FIX: After each selection we HIDE the shared listbox (display:none). Before
-    // the next field, we UNHIDE it then activate the new input with native DOM
-    // events (mousedown+focus) so React recognises the switch and repopulates.
+    // FIX: After each selection we HIDE ALL listboxes (display:none). DO NOT
+    // unhide them — React will create a FRESH listbox element when the next
+    // combobox activates. This mirrors why category→condition works: after
+    // forceCloseCategoryDropdown hides the category listboxes, React creates
+    // a new one for condition.
     async function typeToSelectCombobox(
       inputId: string,
       fieldName: string,
       searchText: string,
       fallbackTexts?: string[]
     ): Promise<string | null> {
-      // === STEP 1: Close any open dropdown ===
-      await page.keyboard.press('Tab') // Tab triggers React's onBlur properly
-      await page.waitForTimeout(200)
+      // === STEP 1: Close any open dropdown and hide ALL listboxes ===
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(400)
 
-      // === STEP 2: Hide ALL listboxes, then unhide non-category ones ===
-      // Hiding forces React to re-render the listbox when a new field activates.
+      // Hide ALL listboxes. Do NOT unhide — React creates fresh ones per field.
       await page.evaluate(() => {
         document.querySelectorAll('[role="listbox"]').forEach(lb => {
           (lb as HTMLElement).style.display = 'none'
         })
-        // Category stays permanently hidden
-        document.querySelectorAll('[data-force-hidden="true"]').forEach(el => {
-          (el as HTMLElement).style.display = 'none'
-        })
       })
       await page.waitForTimeout(300)
-
-      // Unhide non-category listboxes so React can repopulate for the new field
-      await page.evaluate(() => {
-        document.querySelectorAll('[role="listbox"]').forEach(lb => {
-          if (!lb.getAttribute('data-force-hidden')) {
-            (lb as HTMLElement).style.display = ''
-          }
-        })
-      })
-      await page.waitForTimeout(200)
 
       const escapedId = inputId.replace(/([^\w-])/g, '\\$1')
       const inputLocator = page.locator(`#${escapedId}`)
@@ -429,107 +411,73 @@ export async function createDepopListingBrowser(
       await inputLocator.scrollIntoViewIfNeeded().catch(() => null)
       await page.waitForTimeout(200)
 
-      // === STEP 3: Activate this field's combobox with native DOM events ===
-      // Playwright's .click() sometimes doesn't trigger React's synthetic event
-      // system for combobox focus switching. Dispatch native events directly.
-      await page.evaluate((id) => {
-        const input = document.getElementById(id)
-        if (!input) return
-        // Full mouse event sequence that React's event delegation captures
-        input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-        input.focus()
-        input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
-        input.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
-        input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-      }, inputId)
-      await page.waitForTimeout(500)
+      // === STEP 2: Click to activate this field's combobox ===
+      // Playwright's .click() triggers React's synthetic event system.
+      // With all old listboxes hidden, React must create a fresh one.
+      await inputLocator.click()
+      await page.waitForTimeout(600)
 
-      // Also do a Playwright click for good measure (belt and suspenders)
-      await inputLocator.click().catch(() => null)
-      await page.waitForTimeout(300)
-
-      // === STEP 4: Type to filter options ===
-      await inputLocator.fill('')
-      await page.waitForTimeout(100)
-      await inputLocator.pressSequentially(searchText, { delay: 60 })
+      // === STEP 3: Type to filter options ===
+      await inputLocator.fill(searchText)
       await page.waitForTimeout(800)
 
-      // === STEP 5: Check options and validate they belong to this field ===
+      // === STEP 4: Check options and validate ===
       let optCount = await page.locator('[role="option"]').count()
-      const CONDITION_WORDS = ['brand new', 'like new', 'used - excellent', 'used - good', 'used - fair']
 
-      if (optCount > 0 && fieldName !== 'Condition') {
+      // Log what options we see
+      if (optCount > 0) {
         const optTexts = await page.locator('[role="option"]').allTextContents().catch(() => [])
         const optPreview = optTexts.slice(0, 6).map(t => t.trim())
-        const looksLikeCondition = optPreview.some(t =>
-          CONDITION_WORDS.some(cw => t.toLowerCase().includes(cw))
-        )
-        if (looksLikeCondition) {
-          console.warn(`[Depop] ${fieldName}: STALE condition options [${optPreview.join(', ')}] — retrying with aggressive reset`)
-          // Hide listboxes, blur, wait, unhide, re-focus
-          await page.evaluate(() => {
-            document.querySelectorAll('[role="listbox"]').forEach(lb => {
-              (lb as HTMLElement).style.display = 'none'
-            })
-          })
-          await page.keyboard.press('Escape')
-          await page.waitForTimeout(300)
-          await page.locator('textarea[name="description"]').click().catch(() => null)
-          await page.waitForTimeout(500)
-          // Unhide
-          await page.evaluate(() => {
-            document.querySelectorAll('[role="listbox"]').forEach(lb => {
-              if (!lb.getAttribute('data-force-hidden')) {
-                (lb as HTMLElement).style.display = ''
-              }
-            })
-          })
-          await page.waitForTimeout(300)
-          // Re-activate via native events
-          await page.evaluate((id) => {
-            const input = document.getElementById(id)
-            if (!input) return
-            input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-            input.focus()
-            input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
-            input.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
-            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-          }, inputId)
-          await page.waitForTimeout(500)
-          await inputLocator.click().catch(() => null)
-          await page.waitForTimeout(300)
-          await inputLocator.fill('')
-          await page.waitForTimeout(100)
-          await inputLocator.pressSequentially(searchText, { delay: 60 })
-          await page.waitForTimeout(1000)
-          optCount = await page.locator('[role="option"]').count()
+        console.log(`[Depop] ${fieldName}: ${optCount} options: [${optPreview.join(', ')}]`)
 
-          // Check again
-          if (optCount > 0) {
-            const retryTexts = await page.locator('[role="option"]').allTextContents().catch(() => [])
-            const retryPreview = retryTexts.slice(0, 6).map(t => t.trim())
-            const stillStale = retryPreview.some(t =>
-              CONDITION_WORDS.some(cw => t.toLowerCase().includes(cw))
-            )
-            if (stillStale) {
-              console.warn(`[Depop] ${fieldName}: options STILL stale after retry [${retryPreview.join(', ')}] — skipping`)
-              await page.keyboard.press('Escape')
-              await page.waitForTimeout(200)
-              return null
+        // Validate: detect stale options from condition or category
+        if (fieldName !== 'Condition') {
+          const STALE_WORDS = [
+            'brand new', 'like new', 'used - excellent', 'used - good', 'used - fair',
+            'hoodies', 'sweatshirts', 'jumpers', 'cardigans', 'blazers', 'coats',
+          ]
+          const looksStale = optPreview.some(t =>
+            STALE_WORDS.some(sw => t.toLowerCase().includes(sw))
+          )
+          if (looksStale) {
+            console.warn(`[Depop] ${fieldName}: STALE options detected — hiding and retrying`)
+            // Hide the stale listbox
+            await page.evaluate(() => {
+              document.querySelectorAll('[role="listbox"]').forEach(lb => {
+                (lb as HTMLElement).style.display = 'none'
+              })
+            })
+            await page.keyboard.press('Escape')
+            await page.waitForTimeout(400)
+            await page.locator('textarea[name="description"]').click().catch(() => null)
+            await page.waitForTimeout(500)
+            // Re-click the input — React should create yet another fresh listbox
+            await inputLocator.click()
+            await page.waitForTimeout(600)
+            await inputLocator.fill(searchText)
+            await page.waitForTimeout(1000)
+            optCount = await page.locator('[role="option"]').count()
+            if (optCount > 0) {
+              const retryTexts = await page.locator('[role="option"]').allTextContents().catch(() => [])
+              const retryPreview = retryTexts.slice(0, 6).map(t => t.trim())
+              const stillStale = retryPreview.some(t =>
+                STALE_WORDS.some(sw => t.toLowerCase().includes(sw))
+              )
+              if (stillStale) {
+                console.warn(`[Depop] ${fieldName}: still stale after retry [${retryPreview.join(', ')}] — skipping`)
+                await page.keyboard.press('Escape')
+                return null
+              }
+              console.log(`[Depop] ${fieldName}: retry succeeded: [${retryPreview.join(', ')}]`)
             }
-            console.log(`[Depop] ${fieldName}: retry succeeded, options: [${retryPreview.join(', ')}]`)
           }
-        } else {
-          console.log(`[Depop] ${fieldName}: options look valid: [${optPreview.join(', ')}]`)
         }
       }
 
       // Try fallback search terms if no results
       if (optCount === 0 && fallbackTexts) {
         for (const fallback of fallbackTexts) {
-          await inputLocator.fill('')
-          await page.waitForTimeout(100)
-          await inputLocator.pressSequentially(fallback, { delay: 60 })
+          await inputLocator.fill(fallback)
           await page.waitForTimeout(800)
           optCount = await page.locator('[role="option"]').count()
           if (optCount > 0) {
@@ -542,11 +490,10 @@ export async function createDepopListingBrowser(
       if (optCount === 0) {
         console.warn(`[Depop] ${fieldName}: no options after typing "${searchText}"`)
         await page.keyboard.press('Escape')
-        await page.waitForTimeout(200)
         return null
       }
 
-      // === STEP 6: Select first filtered option via keyboard ===
+      // === STEP 5: Select first filtered option ===
       await page.keyboard.press('ArrowDown')
       await page.waitForTimeout(200)
       await page.keyboard.press('Enter')
@@ -555,14 +502,12 @@ export async function createDepopListingBrowser(
       const finalValue = await inputLocator.inputValue().catch(() => null)
       console.log(`[Depop] ${fieldName} selected: ${finalValue ?? searchText}`)
 
-      // === STEP 7: AFTER selection, hide the listbox to prevent leaking ===
-      // This is the KEY fix — same pattern as forceCloseCategoryDropdown.
-      // Without this, the next combobox sees stale options from this field.
+      // === STEP 6: Hide ALL listboxes after selection ===
+      // Prevents this field's options from leaking to the next combobox.
+      // React will create a fresh listbox when the next field activates.
       await page.evaluate(() => {
         document.querySelectorAll('[role="listbox"]').forEach(lb => {
-          if (!lb.getAttribute('data-force-hidden')) {
-            (lb as HTMLElement).style.display = 'none'
-          }
+          (lb as HTMLElement).style.display = 'none'
         })
       })
       await page.waitForTimeout(200)
@@ -614,12 +559,12 @@ export async function createDepopListingBrowser(
       }
     }
 
-    // ─── 7. Fill brand (optional) — uses same hide/unhide pattern ────────────
+    // ─── 7. Fill brand (optional) — hide listboxes before/after ───────────────
     if (listing.brand) {
       try {
         const brandInputId = await findComboboxByLabel(/^brand\b/i)
         if (brandInputId) {
-          // Hide all listboxes first, then unhide (forces React to repopulate)
+          // Hide all listboxes first so React creates a fresh one for brand
           await page.keyboard.press('Escape')
           await page.waitForTimeout(200)
           await page.locator('textarea[name="description"]').click().catch(() => null)
@@ -630,32 +575,13 @@ export async function createDepopListingBrowser(
             })
           })
           await page.waitForTimeout(200)
-          await page.evaluate(() => {
-            document.querySelectorAll('[role="listbox"]').forEach(lb => {
-              if (!lb.getAttribute('data-force-hidden')) {
-                (lb as HTMLElement).style.display = ''
-              }
-            })
-          })
-          await page.waitForTimeout(200)
 
           const escapedId = brandInputId.replace(/([^\w-])/g, '\\$1')
           const brandLocator = page.locator(`#${escapedId}`)
           await brandLocator.scrollIntoViewIfNeeded().catch(() => null)
-          // Native events to activate the combobox
-          await page.evaluate((id) => {
-            const input = document.getElementById(id)
-            if (!input) return
-            input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-            input.focus()
-            input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
-            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-          }, brandInputId)
+          await brandLocator.click()
           await page.waitForTimeout(300)
-          await brandLocator.click().catch(() => null)
-          await page.waitForTimeout(200)
-          await brandLocator.fill('')
-          await brandLocator.pressSequentially(listing.brand, { delay: 50 })
+          await brandLocator.fill(listing.brand)
           await page.waitForTimeout(800)
           const firstOpt = page.locator('[role="option"]').first()
           if (await firstOpt.count() > 0) {
@@ -668,9 +594,7 @@ export async function createDepopListingBrowser(
           // Hide listbox after brand selection
           await page.evaluate(() => {
             document.querySelectorAll('[role="listbox"]').forEach(lb => {
-              if (!lb.getAttribute('data-force-hidden')) {
-                (lb as HTMLElement).style.display = 'none'
-              }
+              (lb as HTMLElement).style.display = 'none'
             })
           })
         }
