@@ -437,8 +437,8 @@ export async function createDepopListingBrowser(
       fallbackTexts?: string[]
     ): Promise<string | null> {
       // === STEP 1: Close any open dropdown ===
-      await page.keyboard.press('Tab')
-      await page.waitForTimeout(150)
+      // IMPORTANT: Do NOT use Tab — it can trigger React onBlur handlers that
+      // cause hooks ordering issues (React error #310). Just Escape + click away.
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
       await page.locator('textarea[name="description"]').click().catch(() => null)
@@ -462,10 +462,15 @@ export async function createDepopListingBrowser(
       await page.waitForTimeout(800) // longer wait for React to switch dropdown
 
       // === STEP 3: Type to filter options ===
-      await inputLocator.fill('')
+      // CRITICAL: Do NOT use fill('') — Playwright's fill() bypasses React's
+      // synthetic event system and directly sets the input value. This causes
+      // React's controlled component to hit a different render path, triggering
+      // "Rendered more hooks than during the previous render" (error #310).
+      // Instead, use Ctrl+A to select all text, then type over it naturally.
+      await page.keyboard.press('Control+a')
       await page.waitForTimeout(100)
-      await inputLocator.pressSequentially(searchText, { delay: 50 })
-      await page.waitForTimeout(800)
+      await inputLocator.pressSequentially(searchText, { delay: 60 })
+      await page.waitForTimeout(1000)
 
       // === STEP 4: Check VISIBLE options only ===
       let opts = await getVisibleOptions()
@@ -496,9 +501,9 @@ export async function createDepopListingBrowser(
             // Re-click the input — React should show the correct field's dropdown
             await inputLocator.click()
             await page.waitForTimeout(800)
-            await inputLocator.fill('')
+            await page.keyboard.press('Control+a')
             await page.waitForTimeout(100)
-            await inputLocator.pressSequentially(searchText, { delay: 50 })
+            await inputLocator.pressSequentially(searchText, { delay: 60 })
             await page.waitForTimeout(1000)
             opts = await getVisibleOptions()
             if (opts.count > 0) {
@@ -520,10 +525,10 @@ export async function createDepopListingBrowser(
       // Try fallback search terms if no visible results
       if (opts.count === 0 && fallbackTexts) {
         for (const fallback of fallbackTexts) {
-          await inputLocator.fill('')
+          await page.keyboard.press('Control+a')
           await page.waitForTimeout(100)
-          await inputLocator.pressSequentially(fallback, { delay: 50 })
-          await page.waitForTimeout(800)
+          await inputLocator.pressSequentially(fallback, { delay: 60 })
+          await page.waitForTimeout(1000)
           opts = await getVisibleOptions()
           if (opts.count > 0) {
             console.log(`[Depop] ${fieldName}: fallback "${fallback}" got ${opts.count} options`)
@@ -548,12 +553,12 @@ export async function createDepopListingBrowser(
       console.log(`[Depop] ${fieldName} selected: ${finalValue ?? searchText}`)
 
       // === STEP 6: Properly close the dropdown ===
-      // Tab triggers React's onBlur which cleanly closes the dropdown.
-      // This ensures the shared listbox is free for the next field.
-      await page.keyboard.press('Tab')
-      await page.waitForTimeout(200)
+      // IMPORTANT: Do NOT use Tab — it triggers React's onBlur which can cause
+      // hooks ordering issues (React error #310). Just Escape + click away.
       await page.keyboard.press('Escape')
-      await page.waitForTimeout(200)
+      await page.waitForTimeout(300)
+      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.waitForTimeout(300)
 
       return finalValue ?? searchText
     }
@@ -627,9 +632,10 @@ export async function createDepopListingBrowser(
           await brandLocator.scrollIntoViewIfNeeded().catch(() => null)
           await brandLocator.click()
           await page.waitForTimeout(300)
-          await brandLocator.fill('')
-          await brandLocator.pressSequentially(listing.brand, { delay: 50 })
-          await page.waitForTimeout(800)
+          await page.keyboard.press('Control+a')
+          await page.waitForTimeout(100)
+          await brandLocator.pressSequentially(listing.brand, { delay: 60 })
+          await page.waitForTimeout(1000)
           const opts = await getVisibleOptions()
           if (opts.count > 0) {
             await page.keyboard.press('ArrowDown')
@@ -640,7 +646,9 @@ export async function createDepopListingBrowser(
             await page.keyboard.press('Enter')
             console.log('[Depop] Brand typed (no suggestions):', listing.brand)
           }
-          await page.keyboard.press('Tab')
+          await page.keyboard.press('Escape')
+          await page.waitForTimeout(200)
+          await page.locator('textarea[name="description"]').click().catch(() => null)
           await page.waitForTimeout(200)
         }
       } catch {
