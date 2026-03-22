@@ -325,10 +325,10 @@ export async function createDepopListingBrowser(
     // "Application error: a client-side exception has occurred".
     // Instead, use natural close: Escape + click away from any combobox.
     async function forceCloseCategoryDropdown() {
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(200)
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(200)
+      // Click away from category combobox to close the dropdown naturally.
+      // Category value was set via pill click or option click (not Enter),
+      // so Escape here would only affect category (which uses a different pattern).
+      // Still avoid Escape to be safe — just click away multiple times.
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(500)
       // Verify the category dropdown actually closed
@@ -339,8 +339,8 @@ export async function createDepopListingBrowser(
         return style.display !== 'none' && style.visibility !== 'hidden'
       })
       if (categoryOpen) {
-        console.log('[Depop] Category dropdown still open — pressing Escape again')
-        await page.keyboard.press('Escape')
+        console.log('[Depop] Category dropdown still open — clicking price to force blur')
+        await page.locator('[data-testid="priceAmount__input"]').click().catch(() => null)
         await page.waitForTimeout(300)
         await page.locator('textarea[name="description"]').click().catch(() => null)
         await page.waitForTimeout(300)
@@ -437,10 +437,9 @@ export async function createDepopListingBrowser(
       fallbackTexts?: string[]
     ): Promise<string | null> {
       // === STEP 1: Close any open dropdown ===
-      // IMPORTANT: Do NOT use Tab — it can trigger React onBlur handlers that
-      // cause hooks ordering issues (React error #310). Just Escape + click away.
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(200)
+      // IMPORTANT: Do NOT press Escape — it reverts combobox values.
+      // Do NOT press Tab — it triggers onBlur causing React error #310.
+      // Just click the description textarea to move focus away.
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(500)
 
@@ -490,12 +489,7 @@ export async function createDepopListingBrowser(
           )
           if (looksStale) {
             console.warn(`[Depop] ${fieldName}: STALE visible options — closing and retrying`)
-            // NO DOM manipulation — use natural close (Escape + blur) to let React
-            // properly close the stale dropdown and switch to the correct one.
-            await page.keyboard.press('Escape')
-            await page.waitForTimeout(300)
-            await page.keyboard.press('Escape')
-            await page.waitForTimeout(200)
+            // Just click away to close — no Escape (reverts values) or Tab (React #310).
             await page.locator('textarea[name="description"]').click().catch(() => null)
             await page.waitForTimeout(600)
             // Re-click the input — React should show the correct field's dropdown
@@ -513,7 +507,7 @@ export async function createDepopListingBrowser(
               )
               if (stillStale) {
                 console.warn(`[Depop] ${fieldName}: still stale [${retryPreview.join(', ')}] — skipping`)
-                await page.keyboard.press('Escape')
+                await page.locator('textarea[name="description"]').click().catch(() => null)
                 return null
               }
               console.log(`[Depop] ${fieldName}: retry succeeded: [${retryPreview.join(', ')}]`)
@@ -539,7 +533,7 @@ export async function createDepopListingBrowser(
 
       if (opts.count === 0) {
         console.warn(`[Depop] ${fieldName}: no visible options after typing "${searchText}"`)
-        await page.keyboard.press('Escape')
+        await page.locator('textarea[name="description"]').click().catch(() => null)
         return null
       }
 
@@ -553,14 +547,35 @@ export async function createDepopListingBrowser(
       console.log(`[Depop] ${fieldName} selected: ${finalValue ?? searchText}`)
 
       // === STEP 6: Properly close the dropdown ===
-      // IMPORTANT: Do NOT use Tab — it triggers React's onBlur which can cause
-      // hooks ordering issues (React error #310). Just Escape + click away.
-      await page.keyboard.press('Escape')
-      await page.waitForTimeout(300)
+      // IMPORTANT: Do NOT press Escape — in React comboboxes, Escape = "revert to
+      // previous value", which clears the selection we just made with ArrowDown+Enter.
+      // Do NOT press Tab — it triggers onBlur handlers that can cause React error #310.
+      // Just click away to move focus — this closes the dropdown while keeping the value.
       await page.locator('textarea[name="description"]').click().catch(() => null)
-      await page.waitForTimeout(300)
+      await page.waitForTimeout(500)
 
-      return finalValue ?? searchText
+      // Verify the value actually stuck
+      const verifyValue = await inputLocator.inputValue().catch(() => null)
+      if (!verifyValue) {
+        console.warn(`[Depop] ${fieldName}: value cleared after closing! Trying re-select...`)
+        // Re-click, re-type, re-select without Escape
+        await inputLocator.click()
+        await page.waitForTimeout(500)
+        await page.keyboard.press('Control+a')
+        await page.waitForTimeout(100)
+        await inputLocator.pressSequentially(searchText, { delay: 60 })
+        await page.waitForTimeout(800)
+        await page.keyboard.press('ArrowDown')
+        await page.waitForTimeout(200)
+        await page.keyboard.press('Enter')
+        await page.waitForTimeout(500)
+        await page.locator('textarea[name="description"]').click().catch(() => null)
+        await page.waitForTimeout(300)
+        const retryValue = await inputLocator.inputValue().catch(() => null)
+        console.log(`[Depop] ${fieldName}: retry value = "${retryValue}"`)
+      }
+
+      return finalValue || searchText
     }
 
     // ─── 4. Select condition via combobox ─────────────────────────────────────
@@ -622,8 +637,6 @@ export async function createDepopListingBrowser(
       try {
         const brandInputId = await findComboboxByLabel(/^brand\b/i)
         if (brandInputId) {
-          await page.keyboard.press('Escape')
-          await page.waitForTimeout(200)
           await page.locator('textarea[name="description"]').click().catch(() => null)
           await page.waitForTimeout(300)
 
@@ -646,10 +659,9 @@ export async function createDepopListingBrowser(
             await page.keyboard.press('Enter')
             console.log('[Depop] Brand typed (no suggestions):', listing.brand)
           }
-          await page.keyboard.press('Escape')
-          await page.waitForTimeout(200)
+          // Click away to close dropdown — no Escape (reverts combobox values)
           await page.locator('textarea[name="description"]').click().catch(() => null)
-          await page.waitForTimeout(200)
+          await page.waitForTimeout(300)
         }
       } catch {
         // Brand is optional
@@ -683,7 +695,7 @@ export async function createDepopListingBrowser(
     // ─── 8c. Pre-submit: scan for unfilled required comboboxes and auto-fill ─
     // Uses Playwright native click (not page.evaluate click) to open each dropdown
     try {
-      await page.keyboard.press('Escape')
+      await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(300)
 
       // Find all unfilled combobox inputs and their IDs
@@ -752,9 +764,7 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 9. Click "Post" to publish ───────────────────────────────────────────
-    // Dismiss any lingering dropdown and click away from comboboxes
-    await page.keyboard.press('Escape')
-    await page.waitForTimeout(200)
+    // Dismiss any lingering dropdown — click away, no Escape (reverts combobox values)
     await page.locator('textarea[name="description"]').click().catch(() => null)
     await page.waitForTimeout(300)
 
