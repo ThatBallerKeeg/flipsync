@@ -704,64 +704,99 @@ export async function createDepopListingBrowser(
     await page.locator('textarea[name="description"]').click().catch(() => null)
     await page.waitForTimeout(300)
 
-    // Scroll to bottom of page to ensure submit button is rendered
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-    await page.waitForTimeout(500)
+    // DO NOT scroll to bottom — Depop's React SPA may unmount form elements
+    // when they scroll out of viewport (virtual rendering).
 
-    // Dump form state for debugging (use broad selectors)
+    // Log current URL and page state for debugging
+    const preSubmitUrl = page.url()
+    console.log(`[Depop] Current URL before submit: ${preSubmitUrl}`)
+
+    // Dump comprehensive page state
     const formState = await page.evaluate(() => {
-      // Try multiple selectors for description
-      const descEl = document.querySelector('textarea[name="description"]')
-        ?? document.querySelector('textarea')
-      const desc = (descEl as HTMLTextAreaElement)?.value ?? '(not found)'
+      const url = window.location.href
+      const title = document.title
 
-      // Try multiple selectors for price
-      const priceEl = document.querySelector('[data-testid="priceAmount__input"]')
-        ?? document.querySelector('input[name="price"]')
-        ?? document.querySelector('input[inputmode="decimal"]')
-        ?? document.querySelector('input[type="number"]')
-      const price = (priceEl as HTMLInputElement)?.value ?? '(not found)'
+      // Count ALL elements of each type to understand page structure
+      const textareaCount = document.querySelectorAll('textarea').length
+      const inputCount = document.querySelectorAll('input').length
+      const buttonCount = document.querySelectorAll('button').length
+      const formCount = document.querySelectorAll('form').length
 
-      // Count photos: look for any img that looks like an uploaded photo
-      const photoImgs = document.querySelectorAll('img[src*="media-photos"], img[src*="s3.amazonaws"], img[src*="pictures"], img[src*="depop"]')
-      const photoCount = photoImgs.length
+      // Get all textareas and their values
+      const textareas = Array.from(document.querySelectorAll('textarea'))
+        .map(t => ({ name: t.name, id: t.id, val: (t as HTMLTextAreaElement).value?.slice(0, 30) }))
 
-      // Count combobox fields (try multiple selectors)
-      const comboboxes = Array.from(document.querySelectorAll(
-        'input[role="combobox"], input[aria-haspopup="listbox"], input[aria-autocomplete]'
-      ))
-      const filled = comboboxes.filter(i => (i as HTMLInputElement).value?.trim()).length
-      const total = comboboxes.length
+      // Get all inputs (first 15)
+      const inputs = Array.from(document.querySelectorAll('input')).slice(0, 15)
+        .map(i => ({ type: (i as HTMLInputElement).type, name: (i as HTMLInputElement).name, id: i.id, val: (i as HTMLInputElement).value?.slice(0, 20) }))
 
-      // Find all buttons that could be submit
-      const buttons = Array.from(document.querySelectorAll('button'))
-        .map(b => ({ text: b.textContent?.trim().slice(0, 30) ?? '', type: b.type, disabled: b.disabled }))
-        .filter(b => b.text.length > 0)
-        .slice(0, 8)
+      // Get ALL buttons (include empty-text ones)
+      const buttons = Array.from(document.querySelectorAll('button')).slice(0, 10)
+        .map(b => ({
+          text: b.textContent?.trim().slice(0, 40) ?? '',
+          type: b.type,
+          disabled: b.disabled,
+          className: b.className?.slice(0, 40) ?? '',
+          ariaLabel: b.getAttribute('aria-label') ?? '',
+        }))
 
-      return { desc: desc.slice(0, 50), price, photoCount, comboboxFilled: `${filled}/${total}`, buttons }
-    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1, comboboxFilled: '?', buttons: [] as { text: string; type: string; disabled: boolean }[] }))
-    console.log(`[Depop] Pre-submit form state: photos=${formState.photoCount}, price="${formState.price}", desc="${formState.desc}", comboboxes=${formState.comboboxFilled}`)
-    console.log(`[Depop] Buttons found: ${JSON.stringify(formState.buttons)}`)
+      // Get first 500 chars of visible page text
+      const pageText = document.body?.innerText?.slice(0, 500) ?? '(empty)'
+
+      return { url, title, textareaCount, inputCount, buttonCount, formCount, textareas, inputs, buttons, pageText }
+    }).catch(() => null)
+
+    if (formState) {
+      console.log(`[Depop] Page: ${formState.url} | title="${formState.title}"`)
+      console.log(`[Depop] DOM counts: ${formState.textareaCount} textareas, ${formState.inputCount} inputs, ${formState.buttonCount} buttons, ${formState.formCount} forms`)
+      console.log(`[Depop] Textareas: ${JSON.stringify(formState.textareas)}`)
+      console.log(`[Depop] Inputs: ${JSON.stringify(formState.inputs.slice(0, 8))}`)
+      console.log(`[Depop] Buttons: ${JSON.stringify(formState.buttons)}`)
+      console.log(`[Depop] Page text: ${formState.pageText.slice(0, 300)}`)
+    } else {
+      console.error('[Depop] Could not evaluate page state')
+    }
 
     await page.screenshot({ path: '/tmp/depop-before-submit.png' }).catch(() => null)
 
     // Try multiple selectors for the submit button
     let postBtn = page.locator('button[type="submit"]').first()
     if (await postBtn.count() === 0) {
-      // Fallback: look for button with "Post" or "List" text
       postBtn = page.locator('button:has-text("Post")').first()
     }
     if (await postBtn.count() === 0) {
       postBtn = page.locator('button:has-text("List")').first()
     }
     if (await postBtn.count() === 0) {
-      // Last resort: any prominent button at bottom of form
-      postBtn = page.locator('form button').last()
+      postBtn = page.locator('button:has-text("Next")').first()
     }
-    await postBtn.scrollIntoViewIfNeeded().catch(() => null)
-    await page.waitForTimeout(300)
-    await postBtn.click({ timeout: 10000 })
+    if (await postBtn.count() === 0) {
+      // Try any button with non-empty text that's not navigation
+      postBtn = page.locator('button').filter({ hasNotText: /search|menu|close|back/i }).last()
+    }
+    if (await postBtn.count() === 0) {
+      // Absolute last resort: click via evaluate
+      const clicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'))
+        const submit = btns.find(b => b.type === 'submit')
+          ?? btns.find(b => /post|list|publish|save/i.test(b.textContent ?? ''))
+          ?? btns[btns.length - 1]
+        if (submit) { submit.click(); return submit.textContent?.trim() ?? 'unknown' }
+        // Try clicking any element that looks like a submit
+        const divBtn = document.querySelector('[role="button"]')
+        if (divBtn) { (divBtn as HTMLElement).click(); return 'role=button' }
+        return null
+      })
+      if (clicked) {
+        console.log(`[Depop] Clicked submit via evaluate: "${clicked}"`)
+      } else {
+        throw new Error('No submit button found on page')
+      }
+    } else {
+      await postBtn.scrollIntoViewIfNeeded().catch(() => null)
+      await page.waitForTimeout(300)
+      await postBtn.click({ timeout: 10000 })
+    }
 
     // ─── 10. Wait for redirect to the new product page ───────────────────────
     // After posting, Depop redirects to https://www.depop.com/products/{slug}/
