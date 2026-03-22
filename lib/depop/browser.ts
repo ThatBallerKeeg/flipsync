@@ -698,28 +698,67 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 9. Click "Post" to publish ───────────────────────────────────────────
-    // Dismiss any lingering dropdown
+    // Dismiss any lingering dropdown and click away from comboboxes
     await page.keyboard.press('Escape')
+    await page.waitForTimeout(200)
+    await page.locator('textarea[name="description"]').click().catch(() => null)
     await page.waitForTimeout(300)
 
-    // Dump form state for debugging
+    // Scroll to bottom of page to ensure submit button is rendered
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+    await page.waitForTimeout(500)
+
+    // Dump form state for debugging (use broad selectors)
     const formState = await page.evaluate(() => {
-      const desc = (document.querySelector('textarea[name="description"]') as HTMLTextAreaElement)?.value ?? '(not found)'
-      const price = (document.querySelector('[data-testid="priceAmount__input"]') as HTMLInputElement)?.value ?? '(not found)'
-      // Count uploaded photos (look for img tags within the photo upload area)
-      const photoCount = document.querySelectorAll('[data-testid*="upload"] img, [class*="photo"] img, img[src*="media-photos"], img[src*="s3.amazonaws"], img[src*="pictures"]').length
-      // Count filled combobox fields
-      const comboboxes = Array.from(document.querySelectorAll('input[role="combobox"], input[aria-haspopup="listbox"]'))
+      // Try multiple selectors for description
+      const descEl = document.querySelector('textarea[name="description"]')
+        ?? document.querySelector('textarea')
+      const desc = (descEl as HTMLTextAreaElement)?.value ?? '(not found)'
+
+      // Try multiple selectors for price
+      const priceEl = document.querySelector('[data-testid="priceAmount__input"]')
+        ?? document.querySelector('input[name="price"]')
+        ?? document.querySelector('input[inputmode="decimal"]')
+        ?? document.querySelector('input[type="number"]')
+      const price = (priceEl as HTMLInputElement)?.value ?? '(not found)'
+
+      // Count photos: look for any img that looks like an uploaded photo
+      const photoImgs = document.querySelectorAll('img[src*="media-photos"], img[src*="s3.amazonaws"], img[src*="pictures"], img[src*="depop"]')
+      const photoCount = photoImgs.length
+
+      // Count combobox fields (try multiple selectors)
+      const comboboxes = Array.from(document.querySelectorAll(
+        'input[role="combobox"], input[aria-haspopup="listbox"], input[aria-autocomplete]'
+      ))
       const filled = comboboxes.filter(i => (i as HTMLInputElement).value?.trim()).length
       const total = comboboxes.length
-      return { desc: desc.slice(0, 50), price, photoCount, comboboxFilled: `${filled}/${total}` }
-    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1, comboboxFilled: '?' }))
+
+      // Find all buttons that could be submit
+      const buttons = Array.from(document.querySelectorAll('button'))
+        .map(b => ({ text: b.textContent?.trim().slice(0, 30) ?? '', type: b.type, disabled: b.disabled }))
+        .filter(b => b.text.length > 0)
+        .slice(0, 8)
+
+      return { desc: desc.slice(0, 50), price, photoCount, comboboxFilled: `${filled}/${total}`, buttons }
+    }).catch(() => ({ desc: '(eval error)', price: '(eval error)', photoCount: -1, comboboxFilled: '?', buttons: [] as { text: string; type: string; disabled: boolean }[] }))
     console.log(`[Depop] Pre-submit form state: photos=${formState.photoCount}, price="${formState.price}", desc="${formState.desc}", comboboxes=${formState.comboboxFilled}`)
+    console.log(`[Depop] Buttons found: ${JSON.stringify(formState.buttons)}`)
 
     await page.screenshot({ path: '/tmp/depop-before-submit.png' }).catch(() => null)
 
-    // Scroll the submit button into view and click it
-    const postBtn = page.locator('button[type="submit"]').first()
+    // Try multiple selectors for the submit button
+    let postBtn = page.locator('button[type="submit"]').first()
+    if (await postBtn.count() === 0) {
+      // Fallback: look for button with "Post" or "List" text
+      postBtn = page.locator('button:has-text("Post")').first()
+    }
+    if (await postBtn.count() === 0) {
+      postBtn = page.locator('button:has-text("List")').first()
+    }
+    if (await postBtn.count() === 0) {
+      // Last resort: any prominent button at bottom of form
+      postBtn = page.locator('form button').last()
+    }
     await postBtn.scrollIntoViewIfNeeded().catch(() => null)
     await page.waitForTimeout(300)
     await postBtn.click({ timeout: 10000 })
