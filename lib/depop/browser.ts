@@ -308,39 +308,32 @@ export async function createDepopListingBrowser(
     }
 
     // ─── Force-close the CATEGORY dropdown ──────────────────────────────────
-    // Hide ONLY the big category dropdown (#group-menu and 20+ option listboxes).
-    // We must PRESERVE the small shared listbox that React reuses for Condition,
-    // Size, Color etc. — hiding it prevents React from showing any dropdown.
+    // NO DOM MANIPULATION — setting display:none on React-managed listbox elements
+    // causes React's virtual DOM reconciliation to crash the app with
+    // "Application error: a client-side exception has occurred".
+    // Instead, use natural close: Escape + click away from any combobox.
     async function forceCloseCategoryDropdown() {
       await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
-      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.keyboard.press('Escape')
       await page.waitForTimeout(200)
-      const hidden = await page.evaluate(() => {
-        let count = 0
-        // Target category-specific dropdown by ID
+      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.waitForTimeout(500)
+      // Verify the category dropdown actually closed
+      const categoryOpen = await page.evaluate(() => {
         const groupMenu = document.getElementById('group-menu')
-        if (groupMenu) {
-          groupMenu.style.display = 'none'
-          groupMenu.setAttribute('data-force-hidden', 'true')
-          count++
-        }
-        // Hide any listbox with 15+ options (category mega-dropdowns)
-        // but preserve small listboxes (shared combobox for Condition/Size/etc.)
-        document.querySelectorAll('[role="listbox"]').forEach(lb => {
-          const optCount = lb.querySelectorAll('[role="option"]').length
-          if (optCount >= 15) {
-            (lb as HTMLElement).style.display = 'none';
-            (lb as HTMLElement).setAttribute('data-force-hidden', 'true')
-            count++
-          }
-        })
-        return count
+        if (!groupMenu) return false
+        const style = getComputedStyle(groupMenu)
+        return style.display !== 'none' && style.visibility !== 'hidden'
       })
-      if (hidden > 0) {
-        console.log(`[Depop] Force-hid ${hidden} category dropdown(s)`)
+      if (categoryOpen) {
+        console.log('[Depop] Category dropdown still open — pressing Escape again')
+        await page.keyboard.press('Escape')
+        await page.waitForTimeout(300)
+        await page.locator('textarea[name="description"]').click().catch(() => null)
+        await page.waitForTimeout(300)
       }
-      await page.waitForTimeout(300)
+      console.log('[Depop] Category dropdown close attempted (no DOM manipulation)')
     }
     await forceCloseCategoryDropdown()
 
@@ -455,21 +448,15 @@ export async function createDepopListingBrowser(
           )
           if (looksStale) {
             console.warn(`[Depop] ${fieldName}: STALE visible options — closing and retrying`)
-            // Hide the stale visible listbox, then retry
-            await page.evaluate(() => {
-              document.querySelectorAll('[role="listbox"]').forEach(lb => {
-                const el = lb as HTMLElement
-                if (el.style.display !== 'none') {
-                  el.style.display = 'none'
-                  el.setAttribute('data-stale-hidden', 'true')
-                }
-              })
-            })
+            // NO DOM manipulation — use natural close (Escape + blur) to let React
+            // properly close the stale dropdown and switch to the correct one.
             await page.keyboard.press('Escape')
-            await page.waitForTimeout(400)
+            await page.waitForTimeout(300)
+            await page.keyboard.press('Escape')
+            await page.waitForTimeout(200)
             await page.locator('textarea[name="description"]').click().catch(() => null)
             await page.waitForTimeout(600)
-            // Re-click the input — React should create/show a fresh listbox
+            // Re-click the input — React should show the correct field's dropdown
             await inputLocator.click()
             await page.waitForTimeout(800)
             await inputLocator.fill('')
