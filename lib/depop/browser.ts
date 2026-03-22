@@ -92,6 +92,13 @@ export async function createDepopListingBrowser(
 
   const page = await ctx.newPage()
 
+  // Capture JavaScript errors from the page — critical for diagnosing React crashes
+  const jsErrors: string[] = []
+  page.on('pageerror', (error) => {
+    jsErrors.push(`[${new Date().toISOString()}] ${error.message}`)
+    console.error(`[Depop] PAGE JS ERROR: ${error.message}`)
+  })
+
   try {
     // Navigate to Depop sell form
     // Use 'load' not 'networkidle' — Depop has continuous background requests
@@ -219,6 +226,11 @@ export async function createDepopListingBrowser(
       }
     }
 
+    // Health check after description + price
+    if (!await isPageAlive('description+price fill')) {
+      throw new Error('React app crashed after filling description/price')
+    }
+
     // ─── 3b. Select category (required) ──────────────────────────────────────
     // IMPORTANT: Use AI-suggested pills FIRST — the category combobox creates a
     // hierarchical dropdown with 600+ options that refuses to close and corrupts
@@ -337,6 +349,11 @@ export async function createDepopListingBrowser(
     }
     await forceCloseCategoryDropdown()
 
+    // Health check after category
+    if (!await isPageAlive('category selection')) {
+      throw new Error('React app crashed after category selection')
+    }
+
     // ─── Helper: find combobox input ID by label regex ────────────────────────
     // Returns the input element's ID so we can use Playwright locator.click()
     // (page.evaluate clicks don't trigger React's synthetic events properly)
@@ -383,6 +400,26 @@ export async function createDepopListingBrowser(
         })
         return { count: texts.length, texts }
       })
+    }
+
+    // Health check: verify the React app hasn't crashed
+    async function isPageAlive(label: string): Promise<boolean> {
+      try {
+        const alive = await page.evaluate(() => {
+          return document.querySelectorAll('input').length > 0
+            || document.querySelectorAll('button[type="submit"]').length > 0
+        })
+        if (!alive) {
+          console.error(`[Depop] PAGE DEAD after ${label} — no inputs or submit buttons in DOM`)
+          if (jsErrors.length > 0) {
+            console.error(`[Depop] JS errors captured: ${jsErrors.join(' | ')}`)
+          }
+        }
+        return alive
+      } catch {
+        console.error(`[Depop] PAGE DEAD after ${label} — evaluate failed`)
+        return false
+      }
     }
 
     // Helper: type a value into a combobox input to filter options, then select
@@ -534,6 +571,11 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Condition selection failed:', e)
     }
 
+    // Health check after condition
+    if (!await isPageAlive('condition selection')) {
+      throw new Error('React app crashed after condition selection')
+    }
+
     // ─── 5. Select size (required when category has sizes) ───────────────────
     // Uses Playwright native .click() to open dropdown (page.evaluate clicks don't trigger React)
     console.log(`[Depop] Size selection — listing.size="${listing.size ?? '(null)'}"`)
@@ -563,6 +605,11 @@ export async function createDepopListingBrowser(
       } catch (e) {
         console.warn('[Depop] Size selection error:', e)
       }
+    }
+
+    // Health check after size
+    if (!await isPageAlive('size selection')) {
+      throw new Error('React app crashed after size selection')
     }
 
     // ─── 7. Fill brand (optional) ──────────────────────────────────────────────
@@ -618,6 +665,11 @@ export async function createDepopListingBrowser(
       } catch (e) {
         console.warn('[Depop] Package size selection failed:', e)
       }
+    }
+
+    // Health check after shipping
+    if (!await isPageAlive('shipping selection')) {
+      throw new Error('React app crashed after shipping selection')
     }
 
     // ─── 8c. Pre-submit: scan for unfilled required comboboxes and auto-fill ─
@@ -682,6 +734,13 @@ export async function createDepopListingBrowser(
       }
     } catch (e) {
       console.warn('[Depop] Pre-submit scan error:', e)
+    }
+
+    // Health check after pre-submit scan
+    if (!await isPageAlive('pre-submit scan')) {
+      // Log all captured JS errors for diagnosis
+      console.error(`[Depop] All JS errors: ${jsErrors.join(' | ')}`)
+      throw new Error('React app crashed after pre-submit field scan')
     }
 
     // ─── 9. Click "Post" to publish ───────────────────────────────────────────
