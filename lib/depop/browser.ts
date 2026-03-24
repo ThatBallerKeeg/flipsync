@@ -538,46 +538,59 @@ export async function createDepopListingBrowser(
       }
 
       // === STEP 5: Select first option by clicking it directly ===
-      // Use attribute selector [id="X"] instead of #X to avoid CSS escaping issues
-      // with dots in IDs like "attributes.occasion-menu".
+      // Each strategy wrapped in try/catch so failures fall through to next.
       let clicked = false
       if (ariaControls) {
-        // Strategy A: Attribute selector (handles dots in IDs)
-        const firstOption = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
-        if (await firstOption.count() > 0) {
-          const optText = await firstOption.textContent().catch(() => '')
-          await firstOption.click()
-          clicked = true
-          console.log(`[Depop] ${fieldName}: clicked option "${optText?.trim()}"`)
-          await page.waitForTimeout(500)
-        }
-        // Strategy B: Click first visible option via evaluate (handles shared listboxes)
+        // Strategy A: Playwright attribute selector [id="X"] (handles dots in IDs)
         if (!clicked) {
-          const evalClicked = await page.evaluate((menuId) => {
-            const menu = document.getElementById(menuId)
-            if (menu) {
-              const opt = menu.querySelector('[role="option"]')
-              if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+          try {
+            const firstOption = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
+            if (await firstOption.count() > 0) {
+              const optText = await firstOption.textContent().catch(() => '')
+              await firstOption.click({ timeout: 3000 })
+              clicked = true
+              console.log(`[Depop] ${fieldName}: clicked option "${optText?.trim()}"`)
+              await page.waitForTimeout(500)
+            } else {
+              console.log(`[Depop] ${fieldName}: no options in [id="${ariaControls}"] — trying evaluate`)
             }
-            // Fallback: click first visible option in any visible listbox
-            for (const lb of document.querySelectorAll('[role="listbox"]')) {
-              const el = lb as HTMLElement
-              const s = getComputedStyle(el)
-              if (s.display === 'none' || s.visibility === 'hidden') continue
-              const opt = lb.querySelector('[role="option"]')
-              if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+          } catch (e) {
+            console.warn(`[Depop] ${fieldName}: Strategy A click failed:`, (e as Error).message?.slice(0, 80))
+          }
+        }
+        // Strategy B: Click via page.evaluate (handles shared/detached listboxes)
+        if (!clicked) {
+          try {
+            const evalClicked = await page.evaluate((menuId) => {
+              const menu = document.getElementById(menuId)
+              if (menu) {
+                const opt = menu.querySelector('[role="option"]')
+                if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+              }
+              // Fallback: click first visible option in any visible listbox
+              for (const lb of document.querySelectorAll('[role="listbox"]')) {
+                const el = lb as HTMLElement
+                const s = getComputedStyle(el)
+                if (s.display === 'none' || s.visibility === 'hidden') continue
+                const opt = lb.querySelector('[role="option"]')
+                if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+              }
+              return null
+            }, ariaControls)
+            if (evalClicked) {
+              clicked = true
+              console.log(`[Depop] ${fieldName}: clicked via evaluate "${evalClicked}"`)
+              await page.waitForTimeout(500)
+            } else {
+              console.log(`[Depop] ${fieldName}: evaluate found no clickable options`)
             }
-            return null
-          }, ariaControls)
-          if (evalClicked) {
-            clicked = true
-            console.log(`[Depop] ${fieldName}: clicked via evaluate "${evalClicked}"`)
-            await page.waitForTimeout(500)
+          } catch (e) {
+            console.warn(`[Depop] ${fieldName}: Strategy B failed:`, (e as Error).message?.slice(0, 80))
           }
         }
       }
+      // Strategy C: keyboard selection (always available)
       if (!clicked) {
-        // Fallback C: keyboard selection
         await page.keyboard.press('ArrowDown')
         await page.waitForTimeout(200)
         await page.keyboard.press('Enter')
@@ -863,9 +876,11 @@ export async function createDepopListingBrowser(
       const textareas = Array.from(document.querySelectorAll('textarea'))
         .map(t => ({ name: t.name, id: t.id, val: (t as HTMLTextAreaElement).value?.slice(0, 30) }))
 
-      // Get all inputs (first 15)
-      const inputs = Array.from(document.querySelectorAll('input')).slice(0, 15)
-        .map(i => ({ type: (i as HTMLInputElement).type, name: (i as HTMLInputElement).name, id: i.id, val: (i as HTMLInputElement).value?.slice(0, 20) }))
+      // Get all combobox/text inputs (skip file/hidden/search)
+      const inputs = Array.from(document.querySelectorAll('input'))
+        .filter(i => !['file', 'hidden'].includes((i as HTMLInputElement).type) && i.id !== 'searchBar__input')
+        .slice(0, 20)
+        .map(i => ({ id: i.id, val: (i as HTMLInputElement).value?.slice(0, 25) }))
 
       // Get ALL buttons — show last 15 to find submit button (first ones are nav/photo)
       const allButtons = Array.from(document.querySelectorAll('button'))
@@ -991,12 +1006,15 @@ export async function createDepopListingBrowser(
           // Look for error messages near form fields
           const errorEls = document.querySelectorAll('[role="alert"], [data-testid*="error"], p[class*="error" i], span[class*="error" i], [class*="Error" i]')
           errorEls.forEach(el => {
+            // Skip "clear the selected value" buttons that match [class*="error" i] false positives
+            if ((el as HTMLElement).getAttribute('aria-label')?.includes('clear')) return
+            if (el.tagName === 'BUTTON') return
             // Find the nearest label or section heading
             const parent = el.closest('div[class*="field"], fieldset, section, [class*="Field"]')
             const label = parent?.querySelector('label, legend, h2, h3, [class*="label" i]')
             const fieldName = label?.textContent?.trim() || '(unknown field)'
             const errorText = el.textContent?.trim() || ''
-            if (errorText && errorText.length < 120) {
+            if (errorText && errorText.length < 120 && errorText.toLowerCase() !== 'clear') {
               errors.push(`${fieldName}: ${errorText}`)
             }
           })
