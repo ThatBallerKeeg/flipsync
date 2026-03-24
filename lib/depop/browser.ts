@@ -537,38 +537,54 @@ export async function createDepopListingBrowser(
         return null
       }
 
-      // === STEP 5: Select first filtered option via keyboard ===
-      await page.keyboard.press('ArrowDown')
-      await page.waitForTimeout(200)
-      await page.keyboard.press('Enter')
-      await page.waitForTimeout(500)
+      // === STEP 5: Select first option by clicking it directly ===
+      // ArrowDown+Enter is unreliable — some comboboxes don't update the input value.
+      // Instead, click the first option in this field's specific listbox (via aria-controls).
+      let clicked = false
+      if (ariaControls) {
+        const escapedMenu = ariaControls.replace(/([^\w-])/g, '\\$1')
+        const firstOption = page.locator(`#${escapedMenu} [role="option"]`).first()
+        if (await firstOption.count() > 0) {
+          await firstOption.click()
+          clicked = true
+          await page.waitForTimeout(500)
+        }
+      }
+      if (!clicked) {
+        // Fallback: keyboard selection
+        await page.keyboard.press('ArrowDown')
+        await page.waitForTimeout(200)
+        await page.keyboard.press('Enter')
+        await page.waitForTimeout(500)
+      }
 
       const finalValue = await inputLocator.inputValue().catch(() => null)
-      console.log(`[Depop] ${fieldName} selected: ${finalValue ?? searchText}`)
+      console.log(`[Depop] ${fieldName} selected: "${finalValue}"`)
 
-      // === STEP 6: Properly close the dropdown ===
-      // IMPORTANT: Do NOT press Escape — in React comboboxes, Escape = "revert to
-      // previous value", which clears the selection we just made with ArrowDown+Enter.
-      // Do NOT press Tab — it triggers onBlur handlers that can cause React error #310.
-      // Just click away to move focus — this closes the dropdown while keeping the value.
+      // === STEP 6: Close dropdown by clicking away ===
+      // Do NOT press Escape (reverts value) or Tab (React error #310).
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(500)
 
-      // Verify the value actually stuck
+      // Verify the value stuck — if not, retry with click
       const verifyValue = await inputLocator.inputValue().catch(() => null)
       if (!verifyValue) {
         console.warn(`[Depop] ${fieldName}: value cleared after closing! Trying re-select...`)
-        // Re-click, re-type, re-select without Escape
         await inputLocator.click()
         await page.waitForTimeout(500)
         await page.keyboard.press('Control+a')
         await page.waitForTimeout(100)
         await inputLocator.pressSequentially(searchText, { delay: 60 })
-        await page.waitForTimeout(800)
-        await page.keyboard.press('ArrowDown')
-        await page.waitForTimeout(200)
-        await page.keyboard.press('Enter')
-        await page.waitForTimeout(500)
+        await page.waitForTimeout(1000)
+        // Try clicking the option again
+        if (ariaControls) {
+          const escapedMenu = ariaControls.replace(/([^\w-])/g, '\\$1')
+          const retryOption = page.locator(`#${escapedMenu} [role="option"]`).first()
+          if (await retryOption.count() > 0) {
+            await retryOption.click()
+            await page.waitForTimeout(500)
+          }
+        }
         await page.locator('textarea[name="description"]').click().catch(() => null)
         await page.waitForTimeout(300)
         const retryValue = await inputLocator.inputValue().catch(() => null)
@@ -649,14 +665,27 @@ export async function createDepopListingBrowser(
           await page.waitForTimeout(100)
           await brandLocator.pressSequentially(listing.brand, { delay: 60 })
           await page.waitForTimeout(1000)
+          const brandAriaControls = await brandLocator.getAttribute('aria-controls').catch(() => null)
           const opts = await getVisibleOptions()
-          if (opts.count > 0) {
+          if (opts.count > 0 && brandAriaControls) {
+            const escapedMenu = brandAriaControls.replace(/([^\w-])/g, '\\$1')
+            const firstOpt = page.locator(`#${escapedMenu} [role="option"]`).first()
+            if (await firstOpt.count() > 0) {
+              await firstOpt.click()
+              console.log('[Depop] Brand selected via click:', listing.brand)
+            } else {
+              await page.keyboard.press('ArrowDown')
+              await page.waitForTimeout(100)
+              await page.keyboard.press('Enter')
+              console.log('[Depop] Brand selected via keyboard:', listing.brand)
+            }
+          } else if (opts.count > 0) {
             await page.keyboard.press('ArrowDown')
             await page.waitForTimeout(100)
             await page.keyboard.press('Enter')
             console.log('[Depop] Brand selected:', listing.brand)
           } else {
-            await page.keyboard.press('Enter')
+            // No suggestions — just click away, the typed text stays
             console.log('[Depop] Brand typed (no suggestions):', listing.brand)
           }
           // Click away to close dropdown — no Escape (reverts combobox values)
@@ -794,8 +823,9 @@ export async function createDepopListingBrowser(
       const inputs = Array.from(document.querySelectorAll('input')).slice(0, 15)
         .map(i => ({ type: (i as HTMLInputElement).type, name: (i as HTMLInputElement).name, id: i.id, val: (i as HTMLInputElement).value?.slice(0, 20) }))
 
-      // Get ALL buttons (include empty-text ones)
-      const buttons = Array.from(document.querySelectorAll('button')).slice(0, 10)
+      // Get ALL buttons — show last 15 to find submit button (first ones are nav/photo)
+      const allButtons = Array.from(document.querySelectorAll('button'))
+      const buttons = allButtons.slice(-15)
         .map(b => ({
           text: b.textContent?.trim().slice(0, 40) ?? '',
           type: b.type,
@@ -823,20 +853,25 @@ export async function createDepopListingBrowser(
 
     await page.screenshot({ path: '/tmp/depop-before-submit.png' }).catch(() => null)
 
-    // Try multiple selectors for the submit button
-    let postBtn = page.locator('button[type="submit"]').first()
+    // Try multiple selectors for the submit/post button.
+    // IMPORTANT: Don't use button[type="submit"].first() — the nav bar has
+    // submit buttons (Menu, Search) that would match before the form's Post button.
+    let postBtn = page.locator('button:has-text("Post")').first()
     if (await postBtn.count() === 0) {
-      postBtn = page.locator('button:has-text("Post")').first()
+      postBtn = page.locator('button:has-text("List item")').first()
     }
     if (await postBtn.count() === 0) {
-      postBtn = page.locator('button:has-text("List")').first()
+      postBtn = page.locator('button:has-text("Save as draft")').first()
+    }
+    if (await postBtn.count() === 0) {
+      // Find submit buttons inside form elements (skip nav bar buttons)
+      postBtn = page.locator('form button[type="submit"]').last()
+    }
+    if (await postBtn.count() === 0) {
+      postBtn = page.locator('button[type="submit"]').last()
     }
     if (await postBtn.count() === 0) {
       postBtn = page.locator('button:has-text("Next")').first()
-    }
-    if (await postBtn.count() === 0) {
-      // Try any button with non-empty text that's not navigation
-      postBtn = page.locator('button').filter({ hasNotText: /search|menu|close|back/i }).last()
     }
     if (await postBtn.count() === 0) {
       // Absolute last resort: click via evaluate
