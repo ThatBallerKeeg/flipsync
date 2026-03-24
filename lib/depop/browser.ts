@@ -538,50 +538,94 @@ export async function createDepopListingBrowser(
       }
 
       // === STEP 5: Select first option by clicking it directly ===
-      // ArrowDown+Enter is unreliable — some comboboxes don't update the input value.
-      // Instead, click the first option in this field's specific listbox (via aria-controls).
+      // Use attribute selector [id="X"] instead of #X to avoid CSS escaping issues
+      // with dots in IDs like "attributes.occasion-menu".
       let clicked = false
       if (ariaControls) {
-        const escapedMenu = ariaControls.replace(/([^\w-])/g, '\\$1')
-        const firstOption = page.locator(`#${escapedMenu} [role="option"]`).first()
+        // Strategy A: Attribute selector (handles dots in IDs)
+        const firstOption = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
         if (await firstOption.count() > 0) {
+          const optText = await firstOption.textContent().catch(() => '')
           await firstOption.click()
           clicked = true
+          console.log(`[Depop] ${fieldName}: clicked option "${optText?.trim()}"`)
           await page.waitForTimeout(500)
+        }
+        // Strategy B: Click first visible option via evaluate (handles shared listboxes)
+        if (!clicked) {
+          const evalClicked = await page.evaluate((menuId) => {
+            const menu = document.getElementById(menuId)
+            if (menu) {
+              const opt = menu.querySelector('[role="option"]')
+              if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+            }
+            // Fallback: click first visible option in any visible listbox
+            for (const lb of document.querySelectorAll('[role="listbox"]')) {
+              const el = lb as HTMLElement
+              const s = getComputedStyle(el)
+              if (s.display === 'none' || s.visibility === 'hidden') continue
+              const opt = lb.querySelector('[role="option"]')
+              if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+            }
+            return null
+          }, ariaControls)
+          if (evalClicked) {
+            clicked = true
+            console.log(`[Depop] ${fieldName}: clicked via evaluate "${evalClicked}"`)
+            await page.waitForTimeout(500)
+          }
         }
       }
       if (!clicked) {
-        // Fallback: keyboard selection
+        // Fallback C: keyboard selection
         await page.keyboard.press('ArrowDown')
         await page.waitForTimeout(200)
         await page.keyboard.press('Enter')
         await page.waitForTimeout(500)
+        console.log(`[Depop] ${fieldName}: used keyboard fallback`)
       }
 
       const finalValue = await inputLocator.inputValue().catch(() => null)
-      console.log(`[Depop] ${fieldName} selected: "${finalValue}"`)
 
       // === STEP 6: Close dropdown by clicking away ===
-      // Do NOT press Escape (reverts value) or Tab (React error #310).
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(500)
 
-      // Verify the value stuck — if not, retry with click
+      // Check if selection succeeded — some comboboxes are "chip-based" where
+      // selecting an option adds a tag/chip and clears the input (inputValue = "").
+      // For these, check if a "Remove X" button or "clear" button appeared nearby.
       const verifyValue = await inputLocator.inputValue().catch(() => null)
-      if (!verifyValue) {
-        console.warn(`[Depop] ${fieldName}: value cleared after closing! Trying re-select...`)
+      const hasChip = await page.evaluate((menuId) => {
+        // Look for "Remove X" buttons near this field, indicating chip-based selection
+        const btns = Array.from(document.querySelectorAll('button[aria-label^="Remove"]'))
+        if (btns.length > 0) return true
+        // Also check for "clear the selected value" buttons
+        const clearBtns = Array.from(document.querySelectorAll('button[aria-label*="clear the selected"]'))
+        return clearBtns.length > 0
+      }, ariaControls).catch(() => false)
+
+      if (verifyValue) {
+        console.log(`[Depop] ${fieldName} selected: "${verifyValue}"`)
+      } else if (hasChip) {
+        console.log(`[Depop] ${fieldName} selected via chip (input cleared, chips present)`)
+      } else {
+        console.warn(`[Depop] ${fieldName}: value empty, no chips — retrying...`)
+        // Retry: re-click input, re-type, re-click option
         await inputLocator.click()
         await page.waitForTimeout(500)
         await page.keyboard.press('Control+a')
         await page.waitForTimeout(100)
         await inputLocator.pressSequentially(searchText, { delay: 60 })
         await page.waitForTimeout(1000)
-        // Try clicking the option again
         if (ariaControls) {
-          const escapedMenu = ariaControls.replace(/([^\w-])/g, '\\$1')
-          const retryOption = page.locator(`#${escapedMenu} [role="option"]`).first()
-          if (await retryOption.count() > 0) {
-            await retryOption.click()
+          const retryOpt = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
+          if (await retryOpt.count() > 0) {
+            await retryOpt.click()
+            await page.waitForTimeout(500)
+          } else {
+            await page.keyboard.press('ArrowDown')
+            await page.waitForTimeout(200)
+            await page.keyboard.press('Enter')
             await page.waitForTimeout(500)
           }
         }
@@ -591,7 +635,7 @@ export async function createDepopListingBrowser(
         console.log(`[Depop] ${fieldName}: retry value = "${retryValue}"`)
       }
 
-      return finalValue || searchText
+      return verifyValue || finalValue || searchText
     }
 
     // ─── 4. Select condition via combobox ─────────────────────────────────────
@@ -668,8 +712,8 @@ export async function createDepopListingBrowser(
           const brandAriaControls = await brandLocator.getAttribute('aria-controls').catch(() => null)
           const opts = await getVisibleOptions()
           if (opts.count > 0 && brandAriaControls) {
-            const escapedMenu = brandAriaControls.replace(/([^\w-])/g, '\\$1')
-            const firstOpt = page.locator(`#${escapedMenu} [role="option"]`).first()
+            // Use attribute selector [id="X"] to avoid CSS escaping issues
+            const firstOpt = page.locator(`[id="${brandAriaControls}"] [role="option"]`).first()
             if (await firstOpt.count() > 0) {
               await firstOpt.click()
               console.log('[Depop] Brand selected via click:', listing.brand)
