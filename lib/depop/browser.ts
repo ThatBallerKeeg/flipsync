@@ -843,6 +843,39 @@ export async function createDepopListingBrowser(
       console.warn('[Depop] Pre-submit scan error:', e)
     }
 
+    // ─── 8d. Scan for ANY empty required-looking fields (not just comboboxes) ──
+    try {
+      const allEmptyFields = await page.evaluate(() => {
+        const results: string[] = []
+        // Check all inputs (text, combobox, etc.)
+        document.querySelectorAll('input').forEach(inp => {
+          const i = inp as HTMLInputElement
+          if (['file', 'hidden', 'checkbox', 'radio'].includes(i.type)) return
+          if (i.id === 'searchBar__input') return
+          const val = i.value?.trim()
+          // Check if field has aria-required or is in a required context
+          const required = i.required || i.getAttribute('aria-required') === 'true'
+          const name = i.name || i.id || i.getAttribute('aria-label') || '(unnamed)'
+          if (!val) {
+            results.push(`empty: ${name} (type=${i.type}, role=${i.role || 'none'}, required=${required}, id=${i.id})`)
+          }
+        })
+        // Check selects
+        document.querySelectorAll('select').forEach(sel => {
+          const s = sel as HTMLSelectElement
+          if (!s.value) {
+            results.push(`empty select: ${s.name || s.id || '(unnamed)'}`)
+          }
+        })
+        return results
+      })
+      if (allEmptyFields.length > 0) {
+        console.log(`[Depop] All empty input fields: ${JSON.stringify(allEmptyFields)}`)
+      }
+    } catch (e) {
+      console.warn('[Depop] Empty field scan error:', e)
+    }
+
     // Health check after pre-submit scan
     if (!await isPageAlive('pre-submit scan')) {
       // Log all captured JS errors for diagnosis
@@ -904,7 +937,7 @@ export async function createDepopListingBrowser(
       console.log(`[Depop] Page: ${formState.url} | title="${formState.title}"`)
       console.log(`[Depop] DOM counts: ${formState.textareaCount} textareas, ${formState.inputCount} inputs, ${formState.buttonCount} buttons, ${formState.formCount} forms`)
       console.log(`[Depop] Textareas: ${JSON.stringify(formState.textareas)}`)
-      console.log(`[Depop] Inputs: ${JSON.stringify(formState.inputs.slice(0, 8))}`)
+      console.log(`[Depop] Inputs: ${JSON.stringify(formState.inputs)}`)
       console.log(`[Depop] Buttons: ${JSON.stringify(formState.buttons)}`)
       console.log(`[Depop] Page text: ${formState.pageText.slice(0, 300)}`)
     } else {
@@ -1010,13 +1043,16 @@ export async function createDepopListingBrowser(
             // Skip "clear the selected value" buttons that match [class*="error" i] false positives
             if ((el as HTMLElement).getAttribute('aria-label')?.includes('clear')) return
             if (el.tagName === 'BUTTON') return
-            // Find the nearest label or section heading
-            const parent = el.closest('div[class*="field"], fieldset, section, [class*="Field"]')
-            const label = parent?.querySelector('label, legend, h2, h3, [class*="label" i]')
+            // Find the nearest label or section heading — walk up multiple levels
+            let parent = el.closest('div[class*="field"], fieldset, section, [class*="Field"], [class*="section"], [class*="group"]')
+            if (!parent) parent = el.parentElement?.parentElement?.parentElement ?? null
+            const label = parent?.querySelector('label, legend, h2, h3, h4, [class*="label" i], [class*="heading" i]')
             const fieldName = label?.textContent?.trim() || '(unknown field)'
             const errorText = el.textContent?.trim() || ''
+            // Also dump the surrounding HTML for debugging
+            const parentHtml = (parent ?? el.parentElement)?.innerHTML?.slice(0, 200) ?? ''
             if (errorText && errorText.length < 120 && errorText.toLowerCase() !== 'clear') {
-              errors.push(`${fieldName}: ${errorText}`)
+              errors.push(`${fieldName}: ${errorText} [context: ${parentHtml.slice(0, 150)}]`)
             }
           })
           return errors
