@@ -794,7 +794,7 @@ export async function createDepopListingBrowser(
             const label = input.closest('label') ?? document.querySelector(`label[for="${input.id}"]`)
             const labelText = label?.textContent?.trim() ?? input.getAttribute('aria-label') ?? '(unknown)'
             // Skip fields we already handle or that are optional
-            if (!/package|search|brand|category/i.test(labelText)) {
+            if (!/package|search|category/i.test(labelText)) {
               results.push({ labelText, inputId: input.id || null })
             }
           }
@@ -817,6 +817,7 @@ export async function createDepopListingBrowser(
           'Material': { search: 'Cotton', fallbacks: ['Polyester'] },
           'Body fit': { search: 'Oversized', fallbacks: ['Relaxed', 'Regular'] },
           'City': { search: 'Los Angeles', fallbacks: ['New York', 'Chicago', 'Houston'] },
+          'Brand': { search: listing.brand ?? 'Vintage', fallbacks: ['Unbranded'] },
         }
 
         for (const field of unfilledFields) {
