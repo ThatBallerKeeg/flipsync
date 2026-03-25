@@ -815,7 +815,8 @@ export async function createDepopListingBrowser(
           'Style': { search: 'Casual', fallbacks: ['Streetwear'] },
           'Occasion': { search: 'Casual', fallbacks: ['Everyday'] },
           'Material': { search: 'Cotton', fallbacks: ['Polyester'] },
-          'Body fit': { search: 'Regular', fallbacks: ['Relaxed', 'Oversized'] },
+          'Body fit': { search: 'Oversized', fallbacks: ['Relaxed', 'Regular'] },
+          'City': { search: 'Los Angeles', fallbacks: ['New York', 'Chicago', 'Houston'] },
         }
 
         for (const field of unfilledFields) {
