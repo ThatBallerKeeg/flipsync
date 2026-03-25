@@ -274,6 +274,7 @@ export async function createDepopListingBrowser(
       if (!categoryChosen) {
         const listingCat = (listing.category ?? '').toLowerCase()
         const title = (listing.title ?? '').toLowerCase()
+        const desc = (listing.description ?? '').toLowerCase()
         const categoryKeywords = [
           ['t-shirt', 'T-shirts'], ['jersey', 'T-shirts'], ['tee', 'T-shirts'],
           ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
@@ -285,7 +286,7 @@ export async function createDepopListingBrowser(
         ]
         let searchTerm = ''
         for (const [keyword, label] of categoryKeywords) {
-          if (listingCat.includes(keyword) || title.includes(keyword)) {
+          if (listingCat.includes(keyword) || title.includes(keyword) || desc.includes(keyword)) {
             searchTerm = label
             break
           }

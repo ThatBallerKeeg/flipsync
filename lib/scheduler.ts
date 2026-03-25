@@ -112,9 +112,19 @@ async function runJobs() {
 
       console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist`)
 
+      // Filter out listings marked "PLEASE DO NOT BUY" or similar hold markers
+      const relistable = staleListings.filter(entry => {
+        const desc = (entry.listing.description ?? '').toLowerCase()
+        if (desc.includes('please do not buy') || desc.includes('do not purchase')) {
+          console.log(`[AutoRelist] Skipping ${entry.listingId} — description contains hold marker`)
+          return false
+        }
+        return true
+      })
+
       let relisted = 0
-      for (let i = 0; i < staleListings.length; i++) {
-        const entry = staleListings[i]
+      for (let i = 0; i < relistable.length; i++) {
+        const entry = relistable[i]
         try {
           // Wait 30s between relist attempts to avoid Depop rate-limiting
           if (i > 0) {
@@ -128,7 +138,7 @@ async function runJobs() {
           console.error(`[AutoRelist] Failed for ${entry.listingId}:`, err)
         }
       }
-      results.push(`autoRelist(${relisted}/${staleListings.length})`)
+      results.push(`autoRelist(${relisted}/${relistable.length})`)
     }
 
     console.log('[Scheduler] Done:', results.join(', ') || 'no jobs configured')
