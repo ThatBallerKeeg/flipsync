@@ -19,10 +19,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const comparables = await searchComparables(itemQuery)
+    console.log(`[Price] Got ${comparables.length} comparables for "${itemQuery}"`)
     const suggestion = await synthesizeValuation(itemQuery, condition, comparables)
+    console.log(`[Price] Suggestion: $${suggestion.low}-${suggestion.mid}-${suggestion.high} (${Math.round(suggestion.confidence * 100)}% conf)`)
     return NextResponse.json({ ...suggestion, comparables })
   } catch (err) {
-    console.error('Price suggestion error:', err)
-    return NextResponse.json({ error: 'Price suggestion failed' }, { status: 500 })
+    console.error('[Price] Suggestion error:', err)
+    return NextResponse.json({ error: 'Price suggestion failed', detail: String(err) }, { status: 500 })
   }
 }

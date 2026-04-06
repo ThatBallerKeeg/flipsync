@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db/client'
 import { createDepopListing } from '@/lib/depop/listings'
 import { createEbayListing } from '@/lib/ebay/listings'
 import { depopFetch } from '@/lib/depop/client'
+import { rewriteListingDescription } from '@/lib/claude/rewrite'
 import https from 'https'
 import http from 'http'
 import fs from 'fs'
@@ -132,17 +133,31 @@ export async function relistListing(
 
   // 2. Delete old listing from Depop
   try {
-    await depopFetch(`/products/${depopPlatform.platformListingId}/`, {
+    const delResp = await depopFetch(`/products/${depopPlatform.platformListingId}/`, {
       method: 'DELETE',
     })
-    console.log(`[Relist] Deleted old Depop listing: ${depopPlatform.platformListingId}`)
+    if (delResp.ok) {
+      console.log(`[Relist] Deleted old Depop listing: ${depopPlatform.platformListingId}`)
+    } else {
+      console.warn(`[Relist] DELETE returned ${delResp.status} for ${depopPlatform.platformListingId} — old listing may still be active`)
+    }
   } catch (err) {
     console.warn(`[Relist] Failed to delete old listing (may already be gone):`, err)
   }
 
-  // 3. Create new listing via Playwright using pre-downloaded photos
+  // 3. Rewrite description for freshness (varied wording, shuffled tags)
+  let rewrittenDesc = listing.description
+  try {
+    rewrittenDesc = await rewriteListingDescription(listing.description ?? '', listing.title ?? '')
+    console.log(`[Relist] Description rewritten (${rewrittenDesc.length} chars)`)
+  } catch (err) {
+    console.warn('[Relist] Description rewrite failed, using original:', err)
+  }
+
+  // 4. Create new listing via Playwright using pre-downloaded photos
   const listingWithLocalPhotos = {
     ...listing,
+    description: rewrittenDesc,
     photos: tempPhotos.length > 0 ? tempPhotos : listing.photos,
   }
 
@@ -151,7 +166,7 @@ export async function relistListing(
       listingWithLocalPhotos as Parameters<typeof createDepopListing>[0]
     )
 
-    // 4. Update ListingPlatform with new IDs and fresh listedAt
+    // 5. Update ListingPlatform with new IDs and fresh listedAt
     await prisma.listingPlatform.update({
       where: { id: depopPlatform.id },
       data: {

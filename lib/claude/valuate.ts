@@ -9,9 +9,8 @@ export async function synthesizeValuation(
   comparables: ComparableListing[]
 ): Promise<PriceSuggestion> {
   const stream = await client.messages.stream({
-    model: 'claude-opus-4-6',
-    max_tokens: 3000,
-    thinking: { type: 'enabled', budget_tokens: 2000 },
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
     system: `You are a pricing expert for resale items. Given these recent sold listings, calculate: price_low (10th percentile), price_mid (median), price_high (90th percentile), confidence (0-1 based on number and recency of comps), platform_recommendation (which platform likely yields higher price and why, in one sentence), trend (rising | stable | falling based on date-sorted prices). Return ONLY valid JSON.`,
     messages: [
       {

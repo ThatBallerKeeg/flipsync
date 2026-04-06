@@ -1077,14 +1077,30 @@ export async function createDepopListingBrowser(
 
     // Extract slug from URL
     const match = finalUrl.match(/\/products\/([^/?#]+)/)
-    const slug = match?.[1]
+    const slug = match?.[1]?.replace(/\/manage\/?$/, '')
 
     if (!slug) {
       throw new Error(`Could not extract listing ID from URL: ${finalUrl}`)
     }
 
+    // Fetch the numeric product ID from Depop's web API (needed for API DELETE)
+    let numericId: string | null = null
+    try {
+      numericId = await page.evaluate(async (productSlug: string) => {
+        const res = await fetch(`https://webapi.depop.com/api/v2/products/${productSlug}/`)
+        if (!res.ok) return null
+        const data = await res.json()
+        return data.id?.toString() ?? null
+      }, slug)
+      if (numericId) {
+        console.log(`[Depop] Numeric product ID: ${numericId} (slug: ${slug})`)
+      }
+    } catch {
+      console.warn('[Depop] Could not fetch numeric product ID — storing slug instead')
+    }
+
     return {
-      listingId: slug,
+      listingId: numericId ?? slug,
       url: `https://www.depop.com/products/${slug}/`,
     }
   } finally {

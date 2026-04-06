@@ -104,9 +104,17 @@ export function ListingForm({ initialData, onSave }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ itemQuery: query, condition: itemData.condition ?? 'good' }),
       })
-      const priceData = await priceRes.json()
-      setPriceSuggestion(priceData)
-      if (priceData.mid && !getValues('price')) setValue('price', priceData.mid)
+      if (priceRes.ok) {
+        const priceData = await priceRes.json()
+        if (priceData.mid && priceData.mid > 0) {
+          setPriceSuggestion(priceData)
+          if (!getValues('price')) setValue('price', priceData.mid)
+        } else {
+          console.warn('Price suggestion returned invalid data:', priceData)
+        }
+      } else {
+        console.warn('Price suggestion API failed:', priceRes.status)
+      }
 
       // 4. Generate Depop description
       const descRes = await fetch('/api/ai/describe', {
