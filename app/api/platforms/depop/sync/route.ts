@@ -140,5 +140,38 @@ export async function POST() {
     cursor = String(meta.last_offset_id)
   }
 
-  return NextResponse.json({ synced })
+  // Mark listings that exist in FlipSync but NOT on Depop as ended.
+  // These are items that were sold, deleted, or removed from the shop.
+  const allDepopIds = Array.from(seenIds)
+  const orphanedPlatforms = await prisma.listingPlatform.findMany({
+    where: {
+      platform: 'DEPOP',
+      platformStatus: 'active',
+      ...(allDepopIds.length > 0
+        ? { platformListingId: { notIn: allDepopIds } }
+        : {}),
+    },
+    select: { id: true, listingId: true, platformListingId: true },
+  })
+
+  let removed = 0
+  for (const orphan of orphanedPlatforms) {
+    try {
+      await prisma.listingPlatform.update({
+        where: { id: orphan.id },
+        data: { platformStatus: 'sold' },
+      })
+      await prisma.listing.update({
+        where: { id: orphan.listingId },
+        data: { status: 'SOLD' },
+      })
+      removed++
+    } catch { /* listing may already be updated */ }
+  }
+
+  if (removed > 0) {
+    console.log(`[Depop sync] Marked ${removed} orphaned listings as sold (not found on Depop)`)
+  }
+
+  return NextResponse.json({ synced, removed })
 }
