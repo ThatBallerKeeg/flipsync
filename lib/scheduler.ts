@@ -98,6 +98,56 @@ async function runJobs() {
         console.log(`[AutoRelist] Migrated platformStatus: ${migratedActive.count} → 'active', ${migratedSold.count} → 'sold'`)
       }
 
+      // ── Sync sold items from Depop before relisting ──
+      // Check which "active" listings have actually been sold on Depop
+      const { depopFetch } = await import('@/lib/depop/client')
+      try {
+        const meRes = await depopFetch('/users/me/')
+        if (meRes.ok) {
+          const me = meRes.json() as Record<string, unknown>
+          const depopUserId = me.id
+          if (depopUserId) {
+            const res = await depopFetch(`/users/${depopUserId}/products/?limit=200`)
+            if (res.ok) {
+              const data = res.json() as Record<string, unknown>
+              const products = (data.objects ?? []) as Record<string, unknown>[]
+              // Build a map of depop product ID → status
+              const statusMap = new Map<string, string>()
+              for (const p of products) {
+                statusMap.set(String(p.id ?? ''), String(p.status ?? 'S').toUpperCase())
+              }
+              // Find any "active" listings in our DB that are actually sold on Depop
+              const activePlatforms = await prisma.listingPlatform.findMany({
+                where: { platform: 'DEPOP', platformStatus: 'active' },
+                select: { id: true, platformListingId: true, listingId: true },
+              })
+              let soldCount = 0
+              for (const ap of activePlatforms) {
+                const depopStatus = statusMap.get(ap.platformListingId ?? '')
+                // If listing exists on Depop and is NOT 'S' (for sale), it's sold
+                // If listing doesn't exist in the response at all, it may have been removed/sold
+                if (depopStatus && depopStatus !== 'S') {
+                  await prisma.listingPlatform.update({
+                    where: { id: ap.id },
+                    data: { platformStatus: 'sold' },
+                  })
+                  await prisma.listing.update({
+                    where: { id: ap.listingId },
+                    data: { status: 'SOLD' },
+                  })
+                  soldCount++
+                }
+              }
+              if (soldCount > 0) {
+                console.log(`[AutoRelist] Synced ${soldCount} sold items from Depop`)
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[AutoRelist] Depop sync failed, continuing with cached statuses:', err)
+      }
+
       const staleListings = await prisma.listingPlatform.findMany({
         where: {
           platform: 'DEPOP',
@@ -112,10 +162,10 @@ async function runJobs() {
 
       console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist`)
 
-      // Filter out listings marked "PLEASE DO NOT BUY" or similar hold markers
+      // Filter out listings marked with hold markers
       const relistable = staleListings.filter(entry => {
         const desc = (entry.listing.description ?? '').toLowerCase()
-        if (desc.includes('please do not buy') || desc.includes('do not purchase')) {
+        if (desc.includes('do not buy') || desc.includes('do not purchase') || desc.includes('not for sale')) {
           console.log(`[AutoRelist] Skipping ${entry.listingId} — description contains hold marker`)
           return false
         }

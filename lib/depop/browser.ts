@@ -277,7 +277,7 @@ export async function createDepopListingBrowser(
         const desc = (listing.description ?? '').toLowerCase()
         const categoryKeywords = [
           ['t-shirt', 'T-shirts'], ['jersey', 'T-shirts'], ['tee', 'T-shirts'],
-          ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'],
+          ['hoodie', 'Hoodies'], ['sweatshirt', 'Sweatshirts'], ['sweater', 'Jumpers'],
           ['pant', 'Pants'], ['short', 'Shorts'], ['jean', 'Jeans'],
           ['jacket', 'Jackets'], ['coat', 'Coats'], ['blazer', 'Blazers'],
           ['dress', 'Dresses'], ['skirt', 'Skirts'], ['shirt', 'Shirts'],
