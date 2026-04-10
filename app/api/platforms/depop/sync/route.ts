@@ -58,12 +58,25 @@ export async function POST() {
 
     if (newObjects.length === 0) break // pagination loop detected — stop
 
-    // Batch: collect all depopIds to find existing records in one query
+    // Batch: collect all depopIds AND slugs to find existing records
     const depopIds = newObjects.map((p) => String(p.id ?? ''))
-    const existingPlatforms = await prisma.listingPlatform.findMany({
-      where: { platform: 'DEPOP', platformListingId: { in: depopIds } },
+    const slugUrls = newObjects.map((p) => {
+      const s = String(p.slug ?? p.id ?? '')
+      return `https://www.depop.com/products/${s}/`
     })
-    const existingMap = new Map(existingPlatforms.map((ep) => [ep.platformListingId!, ep]))
+    // Match by numeric ID OR by URL (handles relisted items that stored slug as ID)
+    const existingPlatforms = await prisma.listingPlatform.findMany({
+      where: {
+        platform: 'DEPOP',
+        OR: [
+          { platformListingId: { in: depopIds } },
+          { platformUrl: { in: slugUrls } },
+        ],
+      },
+    })
+    // Build lookup maps by both numeric ID and URL
+    const existingByIdMap = new Map(existingPlatforms.filter(ep => ep.platformListingId).map((ep) => [ep.platformListingId!, ep]))
+    const existingByUrlMap = new Map(existingPlatforms.filter(ep => ep.platformUrl).map((ep) => [ep.platformUrl!, ep]))
 
     for (const product of newObjects) {
       try {
@@ -91,7 +104,7 @@ export async function POST() {
         // Also extract condition
         const condition = product.condition ? String(product.condition).toLowerCase() : undefined
         const platformUrl = `https://www.depop.com/products/${slug}/`
-        const existing = existingMap.get(depopId)
+        const existing = existingByIdMap.get(depopId) ?? existingByUrlMap.get(platformUrl)
 
         // Map Depop status field → FlipSync ListingStatus
         // "S" = for Sale, "P" = Pending/sold, "M" = Marked as sold
@@ -113,6 +126,7 @@ export async function POST() {
           await prisma.listingPlatform.update({
             where: { id: existing.id },
             data: {
+              platformListingId: depopId, // Always store numeric ID for API compatibility
               platformUrl,
               platformStatus: depopStatus,
               syncedAt: new Date(),
