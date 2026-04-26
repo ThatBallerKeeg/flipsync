@@ -72,12 +72,25 @@ export async function createDepopListingBrowser(
   const tempFiles: string[] = []
 
   const b = await getBrowser()
-  const ctx = await b.newContext({
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  })
 
-  // Set auth cookie — Depop website reads 'access_token' from cookies
+  // Try to restore saved browser session (preserves refreshed tokens)
+  const { prisma } = await import('@/lib/db/client')
+  let savedState: string | null = null
+  try {
+    const row = await prisma.appSettings.findUnique({ where: { key: 'depopBrowserState' } })
+    savedState = row?.value ?? null
+  } catch { /* no saved state */ }
+
+  const ctx = savedState
+    ? await b.newContext({
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+        storageState: JSON.parse(savedState),
+      })
+    : await b.newContext({
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+      })
+
+  // Always ensure the access_token cookie is set (in case state didn't have it)
   await ctx.addCookies([
     {
       name: 'access_token',
@@ -1097,6 +1110,31 @@ export async function createDepopListingBrowser(
       }
     } catch {
       console.warn('[Depop] Could not fetch numeric product ID — storing slug instead')
+    }
+
+    // Save browser state for session persistence (captures refreshed tokens)
+    try {
+      const state = await ctx.storageState()
+      await prisma.appSettings.upsert({
+        where: { key: 'depopBrowserState' },
+        create: { key: 'depopBrowserState', value: JSON.stringify(state) },
+        update: { value: JSON.stringify(state) },
+      })
+
+      // If Depop refreshed the access_token, update our stored token too
+      const freshToken = state.cookies.find(
+        (c: { name: string; domain: string }) => c.name === 'access_token' && c.domain.includes('depop')
+      )
+      if (freshToken && (freshToken as { value: string }).value !== token) {
+        const { storeDepopToken, getDepopAccount } = await import('./auth')
+        const account = await getDepopAccount()
+        if (account) {
+          await storeDepopToken((freshToken as { value: string }).value, account.username)
+          console.log('[Depop] Access token refreshed and saved')
+        }
+      }
+    } catch (e) {
+      console.warn('[Depop] Could not save browser state:', (e as Error).message)
     }
 
     return {
