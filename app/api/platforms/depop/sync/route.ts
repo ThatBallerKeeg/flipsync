@@ -118,6 +118,7 @@ export async function POST() {
         const depopDate = product.created_date ?? product.pub_date
         const listedAt = depopDate ? new Date(String(depopDate)) : null
 
+        let finalListingId: string
         if (existing) {
           await prisma.listing.update({
             where: { id: existing.listingId },
@@ -134,13 +135,31 @@ export async function POST() {
               ...(listedAt && { listedAt }),
             },
           })
+          finalListingId = existing.listingId
         } else {
-          const listing = await prisma.listing.create({
+          const newListing = await prisma.listing.create({
             data: { title, description, depopDescription: description, price, photos, tags: [], status: listingStatus, ...(size && { size }), ...(category && { category }), ...(condition && { condition }) },
           })
           await prisma.listingPlatform.create({
-            data: { listingId: listing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt: listedAt ?? new Date() },
+            data: { listingId: newListing.id, platform: 'DEPOP', platformListingId: depopId, platformUrl, platformStatus: depopStatus, syncedAt: new Date(), listedAt: listedAt ?? new Date() },
           })
+          finalListingId = newListing.id
+        }
+
+        // Create Sale record for confirmed sold items (Depop status P or M)
+        if (listingStatus === 'SOLD') {
+          try {
+            await prisma.sale.upsert({
+              where: { listingId: finalListingId },
+              create: {
+                listingId: finalListingId,
+                platform: 'DEPOP',
+                salePrice: price,
+                soldAt: new Date(),
+              },
+              update: {}, // Don't overwrite existing Sale records
+            })
+          } catch { /* Sale record may already exist */ }
         }
         synced++
       } catch (err) {
@@ -173,19 +192,40 @@ export async function POST() {
     try {
       await prisma.listingPlatform.update({
         where: { id: orphan.id },
-        data: { platformStatus: 'sold' },
+        data: { platformStatus: 'ended' },
       })
       await prisma.listing.update({
         where: { id: orphan.listingId },
-        data: { status: 'SOLD' },
+        data: { status: 'ENDED' },
       })
       removed++
     } catch { /* listing may already be updated */ }
   }
 
   if (removed > 0) {
-    console.log(`[Depop sync] Marked ${removed} orphaned listings as sold (not found on Depop)`)
+    console.log(`[Depop sync] Marked ${removed} orphaned listings as ended (not found on Depop)`)
   }
 
-  return NextResponse.json({ synced, removed })
+  // One-time cleanup: convert ghost SOLD listings (no Sale record) to ENDED.
+  // These are listings incorrectly marked as SOLD by previous orphan cleanup runs.
+  const allSoldListings = await prisma.listing.findMany({
+    where: { status: 'SOLD' },
+    select: { id: true, sale: { select: { id: true } } },
+  })
+  const ghostIds = allSoldListings.filter(l => !l.sale).map(l => l.id)
+  let cleaned = 0
+  if (ghostIds.length > 0) {
+    await prisma.listing.updateMany({
+      where: { id: { in: ghostIds } },
+      data: { status: 'ENDED' },
+    })
+    await prisma.listingPlatform.updateMany({
+      where: { listingId: { in: ghostIds }, platform: 'DEPOP' },
+      data: { platformStatus: 'ended' },
+    })
+    cleaned = ghostIds.length
+    console.log(`[Depop sync] Cleaned up ${cleaned} ghost SOLD listings → ENDED`)
+  }
+
+  return NextResponse.json({ synced, removed, cleaned })
 }

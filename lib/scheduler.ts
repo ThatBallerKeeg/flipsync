@@ -119,13 +119,12 @@ async function runJobs() {
               // Find any "active" listings in our DB that are actually sold on Depop
               const activePlatforms = await prisma.listingPlatform.findMany({
                 where: { platform: 'DEPOP', platformStatus: 'active' },
-                select: { id: true, platformListingId: true, listingId: true },
+                select: { id: true, platformListingId: true, listingId: true, listing: { select: { price: true } } },
               })
               let soldCount = 0
               for (const ap of activePlatforms) {
                 const depopStatus = statusMap.get(ap.platformListingId ?? '')
                 // If listing exists on Depop and is NOT 'S' (for sale), it's sold
-                // If listing doesn't exist in the response at all, it may have been removed/sold
                 if (depopStatus && depopStatus !== 'S') {
                   await prisma.listingPlatform.update({
                     where: { id: ap.id },
@@ -135,6 +134,19 @@ async function runJobs() {
                     where: { id: ap.listingId },
                     data: { status: 'SOLD' },
                   })
+                  // Create Sale record for accurate analytics
+                  try {
+                    await prisma.sale.upsert({
+                      where: { listingId: ap.listingId },
+                      create: {
+                        listingId: ap.listingId,
+                        platform: 'DEPOP',
+                        salePrice: ap.listing.price,
+                        soldAt: new Date(),
+                      },
+                      update: {}, // Don't overwrite existing Sale records
+                    })
+                  } catch { /* Sale may already exist */ }
                   soldCount++
                 }
               }
