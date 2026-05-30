@@ -1,4 +1,4 @@
-CREATE TABLE "BulkJob" (
+CREATE TABLE IF NOT EXISTS "BulkJob" (
     "id"          TEXT NOT NULL,
     "status"      TEXT NOT NULL DEFAULT 'processing',
     "phase"       TEXT NOT NULL DEFAULT 'uploading',

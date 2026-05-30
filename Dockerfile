@@ -37,4 +37,9 @@ EXPOSE 3000
 ENV NODE_ENV=production
 ENV PORT=3000
 
-CMD ["sh", "-c", "npx prisma migrate deploy && pnpm start"]
+# resolve --applied tells Prisma "this migration already ran, mark it done"
+# without executing the SQL again. Needed because the 20260529_add_bulk_job
+# migration (8-digit name) created the table, then a rename to 14-digit caused
+# a duplicate-table failure and left P3009 stuck. || true so future deploys
+# don't fail once the migration is in a clean state.
+CMD ["sh", "-c", "npx prisma migrate resolve --applied 20260529000000_add_bulk_job 2>/dev/null || true && npx prisma migrate deploy && pnpm start"]
