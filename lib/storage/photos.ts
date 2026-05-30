@@ -1,14 +1,5 @@
 import sharp from 'sharp'
-
-const BUCKET = 'listing-photos'
-
-function getSupabaseConfig() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url) throw new Error('NEXT_PUBLIC_SUPABASE_URL is not set')
-  if (!key) throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set')
-  return { url: url.replace(/\/+$/, ''), key }
-}
+import { prisma } from '@/lib/db/client'
 
 /**
  * Auto-rotate a photo buffer using its EXIF orientation tag, then strip the tag.
@@ -28,65 +19,61 @@ export async function fixOrientation(buffer: Buffer): Promise<Buffer> {
 }
 
 /**
- * Uploads a photo to Supabase Storage using the raw REST API instead of the
- * supabase-js SDK. The SDK wraps fetch errors in a generic "StorageUnknownError"
- * that hides the actual underlying network error (DNS failure, project paused,
- * cert issue, etc.). Raw fetch surfaces these clearly so we can fix the root cause.
+ * Stores a photo in the PostgreSQL database and returns a relative URL
+ * that can be served by the /api/photos/[id] route.
+ *
+ * Photos are served as /api/photos/[id] (relative URLs work in the browser;
+ * server-side code that needs an absolute URL should prefix http://localhost:PORT).
+ *
+ * Previously used Supabase Storage, but the Supabase project became unreachable.
+ * PostgreSQL storage works reliably through the connection pooler and eliminates
+ * the external dependency.
  */
 export async function uploadPhoto(
   buffer: Buffer,
   filename: string,
   contentType: string
 ): Promise<string> {
-  const { url, key } = getSupabaseConfig()
   const correctedBuffer = await fixOrientation(buffer)
-  const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-  const uploadUrl = `${url}/storage/v1/object/${BUCKET}/${safeName}`
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_')
 
-  let res: Response
-  try {
-    res = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'Content-Type': contentType,
-        'x-upsert': 'false',
-        'cache-control': '3600',
-      },
-      body: new Uint8Array(correctedBuffer),
-    })
-  } catch (e: unknown) {
-    // Raw network errors (TypeError: fetch failed) — surface the underlying cause
-    const err = e as Error & { cause?: unknown; code?: string }
-    const causeStr = err.cause
-      ? (typeof err.cause === 'object' ? JSON.stringify(err.cause, Object.getOwnPropertyNames(err.cause)) : String(err.cause))
-      : 'no cause'
-    console.error('[Supabase] Network fetch failed:', err.message, '| cause:', causeStr, '| url:', uploadUrl)
-    throw new Error(`Supabase network error: ${err.message} (${causeStr})`)
-  }
+  const photo = await prisma.photo.create({
+    data: {
+      filename: safeName,
+      contentType,
+      size: correctedBuffer.length,
+      data: new Uint8Array(correctedBuffer),
+    },
+  })
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    console.error(`[Supabase] Upload rejected: ${res.status} ${res.statusText} — ${body}`)
-    throw new Error(`Supabase upload failed: ${res.status} ${res.statusText} — ${body.slice(0, 200)}`)
-  }
-
-  // Public URL pattern matches what supabase-js getPublicUrl returns
-  return `${url}/storage/v1/object/public/${BUCKET}/${safeName}`
+  return `/api/photos/${photo.id}`
 }
 
 /**
- * Deletes a photo from Supabase Storage given its public URL.
+ * Deletes a photo from the database given its /api/photos/[id] URL.
+ * Also handles legacy Supabase Storage URLs (silently skipped if unreachable).
  * Best-effort — silently swallows errors.
  */
 export async function deletePhoto(photoUrl: string): Promise<void> {
-  const { url, key } = getSupabaseConfig()
+  // New DB-backed photos
+  const dbMatch = photoUrl.match(/\/api\/photos\/([^/?#]+)/)
+  if (dbMatch) {
+    await prisma.photo.delete({ where: { id: dbMatch[1] } }).catch(() => {})
+    return
+  }
+
+  // Legacy Supabase Storage URLs — best-effort delete (project may be unreachable)
+  const BUCKET = 'listing-photos'
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) return
+
   const marker = `/storage/v1/object/public/${BUCKET}/`
   const parts = photoUrl.split(marker)
   if (parts.length < 2) return
-  const path = parts[1]
+  const filePath = parts[1]
 
-  await fetch(`${url}/storage/v1/object/${BUCKET}/${path}`, {
+  await fetch(`${url.replace(/\/+$/, '')}/storage/v1/object/${BUCKET}/${filePath}`, {
     method: 'DELETE',
     headers: { 'Authorization': `Bearer ${key}` },
   }).catch(() => {})

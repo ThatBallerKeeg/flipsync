@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { withRetry } from './retry'
+import { toImageBlock } from './image-blocks'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -52,10 +53,8 @@ export async function groupPhotosByItem(urls: string[]): Promise<PhotoGroup[]> {
 }
 
 async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
-  const imageBlocks: Anthropic.ImageBlockParam[] = urls.map((url) => ({
-    type: 'image',
-    source: { type: 'url', url },
-  }))
+  // Load all photos as image blocks (base64 for local DB-stored photos, URL for external)
+  const imageBlocks: Anthropic.ImageBlockParam[] = await Promise.all(urls.map(toImageBlock))
 
   try {
     const response = await withRetry(() => client.messages.create({

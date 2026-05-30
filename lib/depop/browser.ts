@@ -160,8 +160,32 @@ export async function createDepopListingBrowser(
         // Legacy local path
         const localPath = path.join(process.cwd(), 'public', imgUrl)
         if (fs.existsSync(localPath)) localPaths.push(localPath)
+      } else if (imgUrl.startsWith('/')) {
+        // DB-stored photo — served via /api/photos/[id] as a relative URL.
+        // Download from the local server since Node.js can't use relative URLs.
+        const port = process.env.PORT || '3000'
+        const fullUrl = `http://localhost:${port}${imgUrl}`
+        try {
+          const tmpPath = path.join(os.tmpdir(), `depop-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`)
+          await new Promise<void>((resolve, reject) => {
+            const file = fs.createWriteStream(tmpPath)
+            http.get(fullUrl, (res) => {
+              if (res.statusCode && res.statusCode >= 400) {
+                reject(new Error(`Local photo fetch failed: ${res.statusCode} ${fullUrl}`))
+                return
+              }
+              res.pipe(file)
+              file.on('finish', () => { file.close(); resolve() })
+            }).on('error', reject)
+          })
+          localPaths.push(tmpPath)
+          tempFiles.push(tmpPath)
+          console.log(`[Depop] Downloaded local photo: ${imgUrl}`)
+        } catch (e) {
+          console.warn('[Depop] Failed to download local photo:', imgUrl, e)
+        }
       } else if (imgUrl.startsWith('http://') || imgUrl.startsWith('https://')) {
-        // Download remote URL (Supabase) to a temp file
+        // Download remote URL to a temp file
         try {
           const ext = imgUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
           const tmpPath = path.join(os.tmpdir(), `depop-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
@@ -201,7 +225,13 @@ export async function createDepopListingBrowser(
           { timeout: 12000 }
         ).catch(() => null)
         if (resp) {
-          console.log(`[Depop] Photo ${i + 1} upload: ${resp.status()} ${resp.url()}`)
+          const status = resp.status()
+          console.log(`[Depop] Photo ${i + 1} upload: ${status} ${resp.url()}`)
+          if (status === 401) {
+            // Token expired — clear stale browser state so next attempt starts fresh
+            await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+            throw new Error('Depop session expired (401) — please reconnect your Depop account in Settings → Connected Accounts.')
+          }
         } else {
           console.warn(`[Depop] Photo ${i + 1} upload timed out — network log:`, photoNetworkLog.join(', '))
         }

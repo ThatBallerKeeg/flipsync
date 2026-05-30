@@ -33,7 +33,7 @@ model Listing {
   size             String?
   color            String?
   tags             String[]
-  photos           String[]           // Supabase Storage URLs
+  photos           String[]           // /api/photos/[id] URLs (DB-backed via Photo model)
   status           ListingStatus      @default(DRAFT)
   platforms        ListingPlatform[]
   analytics        ListingAnalytics[]
@@ -137,4 +137,13 @@ model BulkJob {
   error       String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+model Photo {
+  id          String   @id @default(cuid())
+  filename    String
+  contentType String
+  size        Int      @default(0)
+  data        Bytes                           // binary image data stored in Postgres
+  createdAt   DateTime @default(now())
 }

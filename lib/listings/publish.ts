@@ -110,16 +110,27 @@ export async function relistListing(
 
   // 1. Download photos BEFORE deleting the old listing.
   //    Synced listings store Depop CDN URLs which become invalid after deletion.
+  //    DB-stored photos (/api/photos/[id]) are downloaded from localhost.
   const tempPhotos: string[] = []
   try {
     for (const photoUrl of listing.photos.slice(0, 4)) {
-      if (!photoUrl.startsWith('http')) continue
-      const ext = photoUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
+      let downloadUrl: string
+      if (photoUrl.startsWith('/')) {
+        // DB-stored photo — fetch from local server
+        const port = process.env.PORT || '3000'
+        downloadUrl = `http://localhost:${port}${photoUrl}`
+      } else if (photoUrl.startsWith('http')) {
+        downloadUrl = photoUrl
+      } else {
+        continue // skip unrecognised formats
+      }
+
+      const ext = downloadUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
       const tmpPath = path.join(os.tmpdir(), `relist-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
       await new Promise<void>((resolve, reject) => {
         const file = fs.createWriteStream(tmpPath)
-        const client = photoUrl.startsWith('https://') ? https : http
-        client.get(photoUrl, (res) => {
+        const client = downloadUrl.startsWith('https://') ? https : http
+        client.get(downloadUrl, (res) => {
           res.pipe(file)
           file.on('finish', () => { file.close(); resolve() })
         }).on('error', reject)
@@ -138,10 +149,14 @@ export async function relistListing(
     })
     if (delResp.ok) {
       console.log(`[Relist] Deleted old Depop listing: ${depopPlatform.platformListingId}`)
+    } else if (delResp.status === 401) {
+      throw new Error('Depop session expired (401) — please reconnect your Depop account in Settings → Connected Accounts.')
     } else {
       console.warn(`[Relist] DELETE returned ${delResp.status} for ${depopPlatform.platformListingId} — old listing may still be active`)
     }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('401') || msg.includes('session expired')) throw err
     console.warn(`[Relist] Failed to delete old listing (may already be gone):`, err)
   }
 

@@ -1,15 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { AIIdentifyResult } from '@/types'
 import { withRetry } from './retry'
+import { toImageBlock } from './image-blocks'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-
-async function toImageBlock(url: string): Promise<Anthropic.ImageBlockParam> {
-  return {
-    type: 'image',
-    source: { type: 'url', url },
-  }
-}
 
 export async function identifyItemFromImage(imageUrls: string | string[]): Promise<AIIdentifyResult> {
   const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls]
