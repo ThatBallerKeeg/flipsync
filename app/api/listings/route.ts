@@ -30,8 +30,9 @@ export async function GET(req: NextRequest) {
   if (status) {
     where.status = status
   } else {
-    // By default exclude SOLD items — they're shown on the Sales/Orders page
-    where.status = { not: 'SOLD' }
+    // By default exclude SOLD and ENDED — SOLD = confirmed sales (orders page),
+    // ENDED = removed from Depop (not relevant to active inventory)
+    where.status = { notIn: ['SOLD', 'ENDED'] }
   }
   if (platform) where.platforms = { some: { platform } }
 

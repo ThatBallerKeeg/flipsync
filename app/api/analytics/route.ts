@@ -41,12 +41,13 @@ export async function GET() {
   }
   const avgSalePrice30d = itemsSold30d ? recentRevenue / itemsSold30d : 0
 
-  // Listing counts (total + per-platform active counts for sell-through)
+  // Listing counts. ENDED items (removed from Depop without sale confirmation)
+  // are excluded from totals — they're not real inventory and skew every metric.
   const [activeCount, soldCount, draftCount, totalCount] = await Promise.all([
     prisma.listing.count({ where: { status: 'ACTIVE' } }),
     prisma.listing.count({ where: { status: 'SOLD' } }),
     prisma.listing.count({ where: { status: 'DRAFT' } }),
-    prisma.listing.count(),
+    prisma.listing.count({ where: { status: { notIn: ['ENDED'] } } }),
   ])
   const sellThroughRate = activeCount + soldCount > 0 ? soldCount / (activeCount + soldCount) : 0
 

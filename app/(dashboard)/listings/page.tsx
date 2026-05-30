@@ -35,7 +35,8 @@ export default function ListingsPage() {
     queryKey: ['listings'],
     queryFn: () => fetch('/api/listings').then((r) => r.json()),
   })
-  const listings = allListings.filter((l) => l.status !== 'SOLD')
+  // Exclude SOLD (orders page) and ENDED (removed from Depop — not actionable)
+  const listings = allListings.filter((l) => l.status !== 'SOLD' && l.status !== 'ENDED')
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) =>
@@ -55,7 +56,10 @@ export default function ListingsPage() {
       clearTimeout(timeout)
       const data = await res.json()
       await queryClient.invalidateQueries({ queryKey: ['listings'] })
-      alert(`Synced ${data.synced ?? 0} listings from Depop`)
+      const parts = [`${data.active ?? 0} active`]
+      if ((data.sold ?? 0) > 0) parts.push(`${data.sold} sold`)
+      if ((data.removed ?? 0) > 0) parts.push(`${data.removed} ended`)
+      alert(`Depop sync complete — ${parts.join(', ')}`)
     } catch (e: unknown) {
       if (e instanceof Error && e.name === 'AbortError') {
         await queryClient.invalidateQueries({ queryKey: ['listings'] })

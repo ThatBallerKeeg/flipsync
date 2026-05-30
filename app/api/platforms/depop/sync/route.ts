@@ -174,58 +174,53 @@ export async function POST() {
   }
 
   // Mark listings that exist in FlipSync but NOT on Depop as ended.
-  // These are items that were sold, deleted, or removed from the shop.
+  // These are items deleted or removed from the shop.
+  //
+  // SAFETY: only run this if we actually received products from Depop.
+  // If seenIds is empty (API returned 0 results — token expired, network blip,
+  // temporary Depop outage), skipping orphan cleanup prevents wiping every
+  // active listing by accident.
   const allDepopIds = Array.from(seenIds)
-  const orphanedPlatforms = await prisma.listingPlatform.findMany({
-    where: {
-      platform: 'DEPOP',
-      platformStatus: 'active',
-      ...(allDepopIds.length > 0
-        ? { platformListingId: { notIn: allDepopIds } }
-        : {}),
-    },
-    select: { id: true, listingId: true, platformListingId: true },
-  })
-
   let removed = 0
-  for (const orphan of orphanedPlatforms) {
-    try {
-      await prisma.listingPlatform.update({
-        where: { id: orphan.id },
-        data: { platformStatus: 'ended' },
-      })
-      await prisma.listing.update({
-        where: { id: orphan.listingId },
-        data: { status: 'ENDED' },
-      })
-      removed++
-    } catch { /* listing may already be updated */ }
+
+  if (allDepopIds.length > 0) {
+    const orphanedPlatforms = await prisma.listingPlatform.findMany({
+      where: {
+        platform: 'DEPOP',
+        platformStatus: 'active',
+        platformListingId: { notIn: allDepopIds },
+      },
+      select: { id: true, listingId: true, platformListingId: true },
+    })
+
+    for (const orphan of orphanedPlatforms) {
+      try {
+        await prisma.listingPlatform.update({
+          where: { id: orphan.id },
+          data: { platformStatus: 'ended' },
+        })
+        await prisma.listing.update({
+          where: { id: orphan.listingId },
+          data: { status: 'ENDED' },
+        })
+        removed++
+      } catch { /* listing may already be updated */ }
+    }
+
+    if (removed > 0) {
+      console.log(`[Depop sync] Marked ${removed} orphaned listings as ended (not found on Depop)`)
+    }
+  } else {
+    console.warn('[Depop sync] Received 0 products from Depop — skipping orphan cleanup to avoid false positives')
   }
 
-  if (removed > 0) {
-    console.log(`[Depop sync] Marked ${removed} orphaned listings as ended (not found on Depop)`)
-  }
-
-  // One-time cleanup: convert ghost SOLD listings (no Sale record) to ENDED.
-  // These are listings incorrectly marked as SOLD by previous orphan cleanup runs.
-  const allSoldListings = await prisma.listing.findMany({
-    where: { status: 'SOLD' },
-    select: { id: true, sale: { select: { id: true } } },
+  // Count active vs sold in synced items for a clearer response
+  const activeCount = await prisma.listingPlatform.count({
+    where: { platform: 'DEPOP', platformStatus: 'active' },
   })
-  const ghostIds = allSoldListings.filter(l => !l.sale).map(l => l.id)
-  let cleaned = 0
-  if (ghostIds.length > 0) {
-    await prisma.listing.updateMany({
-      where: { id: { in: ghostIds } },
-      data: { status: 'ENDED' },
-    })
-    await prisma.listingPlatform.updateMany({
-      where: { listingId: { in: ghostIds }, platform: 'DEPOP' },
-      data: { platformStatus: 'ended' },
-    })
-    cleaned = ghostIds.length
-    console.log(`[Depop sync] Cleaned up ${cleaned} ghost SOLD listings → ENDED`)
-  }
+  const soldCount = await prisma.listingPlatform.count({
+    where: { platform: 'DEPOP', platformStatus: 'sold' },
+  })
 
-  return NextResponse.json({ synced, removed, cleaned })
+  return NextResponse.json({ synced, active: activeCount, sold: soldCount, removed })
 }
