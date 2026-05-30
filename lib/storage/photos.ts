@@ -11,31 +11,42 @@ function getSupabaseConfig() {
 }
 
 /**
- * Auto-rotate a photo buffer using its EXIF orientation tag, then strip the tag.
- * Phone photos are frequently stored sideways with an EXIF flag saying "rotate me"
- * — many viewers honour the flag but Depop's CDN does not, so we bake the rotation
- * into the pixels before upload.
+ * Single sharp pipeline that:
+ *   1. Reads the EXIF Orientation tag and BAKES the rotation into pixels
+ *      (phone photos are often stored sideways with a "rotate me" flag — many
+ *      viewers honour it but Depop's CDN does NOT, so the rotation has to be
+ *      applied to the actual pixel data, not just the metadata).
+ *   2. Resizes to max 1600px on the longest edge.
+ *   3. Re-encodes as JPEG q78 — sharp's .jpeg() strips ALL metadata by default,
+ *      which removes any residual EXIF Orientation tag.
+ *
+ * Order matters: .rotate() must come BEFORE .resize() so the resize uses the
+ * upright dimensions (width/height swap on rotation), not the sensor-native ones.
+ *
+ * Result: a ~300 KB JPEG that displays correctly in EVERY viewer without
+ * relying on the orientation tag.
  */
-export async function fixOrientation(buffer: Buffer): Promise<Buffer> {
+async function processPhotoForUpload(buffer: Buffer): Promise<Buffer> {
   try {
-    return await sharp(buffer)
-      .rotate()          // reads EXIF Orientation, rotates pixels, removes the tag
-      .withMetadata({ orientation: undefined })  // strip residual orientation
+    return await sharp(buffer, { failOn: 'none' })
+      .rotate()
+      .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 78, mozjpeg: true })
       .toBuffer()
   } catch {
-    return buffer        // non-image or corrupt — return as-is
+    return buffer   // non-image or corrupt — pass through as-is
   }
 }
 
 /**
- * Compress a photo buffer to max 1600px / JPEG q78 before uploading.
- * Reduces typical 3–5 MB phone photos to ~300 KB, saving Supabase Storage quota.
+ * Kept for backwards compatibility with callers that just want orientation fixing.
+ * New code should use processPhotoForUpload() which does the full pipeline.
  */
-async function compressPhoto(buffer: Buffer): Promise<Buffer> {
+export async function fixOrientation(buffer: Buffer): Promise<Buffer> {
   try {
-    return await sharp(buffer)
-      .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 78 })
+    return await sharp(buffer, { failOn: 'none' })
+      .rotate()
+      .jpeg({ quality: 92 })  // strips EXIF, near-lossless
       .toBuffer()
   } catch {
     return buffer
@@ -56,8 +67,7 @@ export async function uploadPhoto(
   contentType: string
 ): Promise<string> {
   const { url, key } = getSupabaseConfig()
-  const rotated = await fixOrientation(buffer)
-  const compressed = await compressPhoto(rotated)
+  const processed = await processPhotoForUpload(buffer)
   const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
   const uploadUrl = `${url}/storage/v1/object/${BUCKET}/${safeName}`
 
@@ -71,7 +81,7 @@ export async function uploadPhoto(
         'x-upsert': 'false',
         'cache-control': '3600',
       },
-      body: new Uint8Array(compressed),
+      body: new Uint8Array(processed),
     })
   } catch (e: unknown) {
     const err = e as Error & { cause?: unknown }
