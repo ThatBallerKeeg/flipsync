@@ -16,41 +16,38 @@ import { prisma } from '@/lib/db/client'
  */
 export async function GET() {
   const results: Record<string, number | string> = {}
+  const errors: string[] = []
 
-  try {
-    // Cache tables — always safe to delete
-    const [pc, val, jobs] = await Promise.all([
-      prisma.priceComparison.deleteMany({}),
-      prisma.valuation.deleteMany({}),
-      prisma.bulkJob.deleteMany({}),
-    ])
-    results.priceComparisons = pc.count
-    results.valuations = val.count
-    results.bulkJobs = jobs.count
-
-    // Large AppSettings value
-    const browserState = await prisma.appSettings.deleteMany({
-      where: { key: 'depopBrowserState' },
-    })
-    results.depopBrowserState = browserState.count
-
-    // Old photos (> 30 days) — recent ones kept for active listings
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    const oldPhotos = await prisma.photo.deleteMany({
-      where: { createdAt: { lt: cutoff } },
-    })
-    results.oldPhotos = oldPhotos.count
-
-    // Run VACUUM to reclaim disk space immediately (no FULL lock needed for autovacuum,
-    // but explicit ANALYZE updates query planner stats)
-    await prisma.$executeRawUnsafe('VACUUM ANALYZE "PriceComparison", "Valuation", "BulkJob", "Photo"')
-    results.vacuum = 'done'
-
-    return NextResponse.json({ ok: true, deleted: results })
-  } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err), partial: results },
-      { status: 500 }
-    )
+  // Each delete is attempted independently so one failure doesn't block the others.
+  // Deletes write only a small WAL entry and succeed even when the data disk is full.
+  const tryDelete = async (label: string, fn: () => Promise<{ count: number }>) => {
+    try {
+      const r = await fn()
+      results[label] = r.count
+    } catch (e) {
+      errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`)
+      results[label] = 'error'
+    }
   }
+
+  await tryDelete('priceComparisons', () => prisma.priceComparison.deleteMany({}))
+  await tryDelete('valuations',       () => prisma.valuation.deleteMany({}))
+  await tryDelete('bulkJobs',         () => prisma.bulkJob.deleteMany({}))
+  await tryDelete('photos',           () => prisma.photo.deleteMany({}))
+  await tryDelete('depopBrowserState',() => prisma.appSettings.deleteMany({ where: { key: 'depopBrowserState' } }))
+
+  // VACUUM marks freed pages as reusable for new inserts.
+  // Runs after deletes; skip if disk is so full it can't write WAL.
+  try {
+    await prisma.$executeRawUnsafe('VACUUM "PriceComparison"')
+    await prisma.$executeRawUnsafe('VACUUM "Valuation"')
+    await prisma.$executeRawUnsafe('VACUUM "BulkJob"')
+    await prisma.$executeRawUnsafe('VACUUM "Photo"')
+    results.vacuum = 'done'
+  } catch (e) {
+    results.vacuum = `skipped (${e instanceof Error ? e.message.slice(0, 60) : 'error'})`
+  }
+
+  const ok = errors.length === 0
+  return NextResponse.json({ ok, deleted: results, errors }, { status: ok ? 200 : 207 })
 }
