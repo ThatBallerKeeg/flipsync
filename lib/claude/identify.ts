@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { AIIdentifyResult } from '@/types'
+import { withRetry } from './retry'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -15,7 +16,7 @@ export async function identifyItemFromImage(imageUrls: string | string[]): Promi
 
   const imageBlocks = await Promise.all(urls.slice(0, 4).map(toImageBlock))
 
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
     system: `You are an expert reseller and vintage clothing authenticator with deep knowledge of streetwear, vintage, and contemporary fashion brands. Analyse ALL provided product photos together.
@@ -47,7 +48,7 @@ Return ONLY valid JSON, no prose, no markdown fences.`,
         ],
       },
     ],
-  })
+  }), 'identify')
 
   const text = response.content.find((b) => b.type === 'text')?.text ?? '{}'
   const match = text.match(/\{[\s\S]*\}/)

@@ -4,31 +4,74 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle, Loader2, Upload, X, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-interface ProgressItem {
-  type: 'listing' | 'error'
-  title?: string
+interface JobResult {
+  ok: boolean
   id?: string
+  title?: string
   price?: number
-  message?: string
+  error?: string
   index: number
+}
+
+interface JobState {
+  status: string    // "processing" | "done" | "error"
+  phase: string     // "grouping" | "building" | "done"
+  totalPhotos: number
+  totalGroups: number
+  created: number
+  results: JobResult[]
+  error?: string
 }
 
 interface BulkDropZoneProps {
   onComplete: (listingIds: string[]) => void
 }
 
+const POLL_INTERVAL = 2500 // ms
+
 export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
   const [isDraggingOver, setIsDraggingOver] = useState(false)
   const [isOpen, setIsOpen] = useState(false)
-  const [phase, setPhase] = useState<'idle' | 'uploading' | 'grouping' | 'building' | 'done'>('idle')
-  const [uploadProgress, setUploadProgress] = useState({ uploaded: 0, total: 0 })
-  const [buildProgress, setBuildProgress] = useState({ current: 0, total: 0 })
-  const [items, setItems] = useState<ProgressItem[]>([])
-  const [createdIds, setCreatedIds] = useState<string[]>([])
+  const [isSending, setIsSending] = useState(false)       // uploading FormData to server
+  const [sendProgress, setSendProgress] = useState(0)     // 0-100 XHR upload progress
+  const [sendTotal, setSendTotal] = useState(0)           // total photos being sent
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [job, setJob] = useState<JobState | null>(null)
   const dragCounter = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const onCompleteRef = useRef(onComplete)
+  useEffect(() => { onCompleteRef.current = onComplete }, [onComplete])
 
-  // Detect drag-over the entire window
+  // ── Polling ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!jobId) return
+    if (pollRef.current) clearInterval(pollRef.current)
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/listings/bulk-build/${jobId}`)
+        if (!res.ok) return
+        const data: JobState = await res.json()
+        setJob(data)
+
+        if (data.status === 'done' || data.status === 'error') {
+          clearInterval(pollRef.current!)
+          pollRef.current = null
+          if (data.status === 'done') {
+            const ids = data.results.filter((r) => r.ok).map((r) => r.id!)
+            onCompleteRef.current(ids)
+          }
+        }
+      } catch { /* network blip — keep polling */ }
+    }, POLL_INTERVAL)
+
+    return () => {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    }
+  }, [jobId])
+
+  // ── Drag detection ───────────────────────────────────────────────────────
   useEffect(() => {
     function onDragEnter(e: DragEvent) {
       if (!e.dataTransfer?.types.includes('Files')) return
@@ -39,19 +82,14 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
       dragCounter.current--
       if (dragCounter.current === 0) setIsDraggingOver(false)
     }
-    function onDragOver(e: DragEvent) {
-      e.preventDefault()
-    }
+    function onDragOver(e: DragEvent) { e.preventDefault() }
     function onDrop(e: DragEvent) {
       e.preventDefault()
       dragCounter.current = 0
       setIsDraggingOver(false)
-      const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
-        f.type.startsWith('image/')
-      )
+      const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/'))
       if (files.length) processFiles(files)
     }
-
     window.addEventListener('dragenter', onDragEnter)
     window.addEventListener('dragleave', onDragLeave)
     window.addEventListener('dragover', onDragOver)
@@ -65,104 +103,86 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const [truncationNote, setTruncationNote] = useState<string | null>(null)
-
-  const processFiles = useCallback(async (allFiles: File[]) => {
-    const MAX_FILES = 80
-    const files = allFiles.slice(0, MAX_FILES)
-    const truncated = allFiles.length > MAX_FILES
-
+  // ── Send photos + start job ──────────────────────────────────────────────
+  const processFiles = useCallback(async (files: File[]) => {
     setIsOpen(true)
-    setPhase('uploading')
-    setItems([])
-    setTruncationNote(truncated ? `${allFiles.length} photos selected — processing first ${MAX_FILES}` : null)
-    setBuildProgress({ current: 0, total: 0 })
-    setCreatedIds([])
-    setUploadProgress({ uploaded: 0, total: files.length })
-    setBuildProgress({ current: 0, total: 0 })
-
-    // Use a local array (not state) to avoid stale-closure issues when calling onComplete
-    const localCreatedIds: string[] = []
+    setIsSending(true)
+    setSendProgress(0)
+    setSendTotal(files.length)
+    setJob(null)
+    setJobId(null)
 
     const form = new FormData()
     for (const f of files) form.append('photos', f)
 
-    function handleEvent(event: Record<string, unknown>) {
-      const type = event.type as string
-      if (type === 'upload') {
-        setUploadProgress({ uploaded: event.uploaded as number, total: event.total as number })
-      } else if (type === 'grouping') {
-        setPhase('grouping')
-      } else if (type === 'listing') {
-        setPhase('building')
-        setBuildProgress({ current: (event.index as number) + 1, total: event.total as number })
-        const id = event.id as string
-        localCreatedIds.push(id)
-        setCreatedIds([...localCreatedIds])
-        setItems((prev) => [
-          ...prev,
-          { type: 'listing', index: event.index as number, title: event.title as string, id, price: event.price as number },
-        ])
-      } else if (type === 'error' && (event.index as number) >= 0) {
-        setItems((prev) => [
-          ...prev,
-          { type: 'error', index: event.index as number, message: event.message as string },
-        ])
-      } else if (type === 'done') {
-        setPhase('done')
-        onComplete(localCreatedIds)
-      }
-    }
-
     try {
-      const res = await fetch('/api/listings/bulk-build', { method: 'POST', body: form })
-      if (!res.ok || !res.body) {
-        throw new Error(`Server error: ${res.status}`)
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-
-        for (const line of lines) {
-          if (!line.trim()) continue
-          try {
-            handleEvent(JSON.parse(line))
-          } catch { /* skip malformed */ }
+      // Use XHR so we can track upload progress
+      const id = await new Promise<string>((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/listings/bulk-build')
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) setSendProgress(Math.round((e.loaded / e.total) * 100))
         }
-      }
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText).jobId) }
+            catch { reject(new Error('Invalid server response')) }
+          } else {
+            reject(new Error(`Upload failed (${xhr.status})`))
+          }
+        }
+        xhr.onerror = () => reject(new Error('Network error during upload'))
+        xhr.send(form)
+      })
+
+      setIsSending(false)
+      setJobId(id)
+      // Polling kicks in via the useEffect above
     } catch (err) {
-      setItems((prev) => [
-        ...prev,
-        { type: 'error', index: -1, message: err instanceof Error ? err.message : String(err) },
-      ])
-      setPhase('done')
+      setIsSending(false)
+      setJob({
+        status: 'error',
+        phase: 'done',
+        totalPhotos: files.length,
+        totalGroups: 0,
+        created: 0,
+        results: [],
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onComplete])
+  }, [])
+
+  // ── Derived state ────────────────────────────────────────────────────────
+  const isDone = job?.status === 'done' || job?.status === 'error'
+
+  function phaseLabel() {
+    if (isSending) {
+      return sendProgress < 100
+        ? `Uploading ${sendTotal} photo${sendTotal !== 1 ? 's' : ''}… ${sendProgress}%`
+        : `Processing upload…`
+    }
+    if (!job) return 'Starting…'
+    if (job.phase === 'grouping') return `Grouping ${job.totalPhotos} photos by item…`
+    if (job.phase === 'building') {
+      const pct = job.totalGroups > 0 ? Math.round((job.created / job.totalGroups) * 100) : 0
+      return `Building listings… ${job.created}/${job.totalGroups} (${pct}%)`
+    }
+    if (job.status === 'done') return `Done — ${job.created} draft listing${job.created !== 1 ? 's' : ''} created`
+    if (job.status === 'error') return `Error: ${job.error ?? 'unknown'}`
+    return 'Working…'
+  }
 
   function handleClose() {
-    if (phase === 'done' || phase === 'idle') {
+    if (isDone || (!isSending && !jobId)) {
       setIsOpen(false)
-      setPhase('idle')
-      setItems([])
+      setJob(null)
+      setJobId(null)
+      setSendProgress(0)
     }
   }
 
-  const phaseLabel = {
-    idle: '',
-    uploading: `Uploading photos… (${uploadProgress.uploaded}/${uploadProgress.total})`,
-    grouping: 'Grouping photos by item…',
-    building: `Building listings… (${buildProgress.current}/${buildProgress.total})`,
-    done: `Done — ${createdIds.length} draft listing${createdIds.length !== 1 ? 's' : ''} created`,
-  }[phase]
+  const successItems = job?.results.filter((r) => r.ok) ?? []
+  const errorItems = job?.results.filter((r) => !r.ok) ?? []
 
   return (
     <>
@@ -172,7 +192,7 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
           <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-primary bg-background px-12 py-10 shadow-xl">
             <Zap className="h-10 w-10 text-primary" />
             <p className="text-lg font-semibold text-primary">Drop photos to build listings</p>
-            <p className="text-sm text-muted-foreground">FlipSync will auto-group and create drafts</p>
+            <p className="text-sm text-muted-foreground">FlipSync will auto-group and create drafts — you can close this tab while it runs</p>
           </div>
         </div>
       )}
@@ -185,7 +205,7 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
         <Upload className="h-4 w-4 shrink-0" />
         <span>
           <span className="font-medium">Drop photos anywhere</span> or click to select —
-          FlipSync will auto-build draft listings for each item
+          FlipSync auto-builds drafts, runs in background even if you close this tab
         </span>
       </button>
       <input
@@ -208,56 +228,71 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
             {/* Header */}
             <div className="flex items-center justify-between border-b px-5 py-4">
               <div className="flex items-center gap-2">
-                {phase === 'done' ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
+                {isDone ? (
+                  <CheckCircle className={`h-5 w-5 ${job?.status === 'error' ? 'text-destructive' : 'text-green-500'}`} />
                 ) : (
                   <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 )}
                 <span className="font-semibold text-sm">
-                  {phase === 'done' ? 'Build complete' : 'Building listings…'}
+                  {isDone ? (job?.status === 'error' ? 'Build failed' : 'Build complete') : 'Building listings…'}
                 </span>
               </div>
-              {phase === 'done' && (
-                <button onClick={handleClose} className="rounded p-1 hover:bg-muted">
-                  <X className="h-4 w-4 text-muted-foreground" />
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {!isDone && (
+                  <span className="text-xs text-muted-foreground">Safe to close this tab</span>
+                )}
+                {isDone && (
+                  <button onClick={handleClose} className="rounded p-1 hover:bg-muted">
+                    <X className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Phase label */}
-            <div className="px-5 py-3 text-sm text-muted-foreground border-b bg-muted/30">
-              {phaseLabel}
-              {truncationNote && (
-                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{truncationNote}</p>
+            {/* Phase label + upload progress bar */}
+            <div className="px-5 py-3 border-b bg-muted/30 space-y-2">
+              <p className="text-sm text-muted-foreground">{phaseLabel()}</p>
+              {isSending && (
+                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all duration-300"
+                    style={{ width: `${sendProgress}%` }}
+                  />
+                </div>
+              )}
+              {!isSending && job && job.totalGroups > 0 && job.phase === 'building' && (
+                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all duration-500"
+                    style={{ width: `${Math.round((job.created / job.totalGroups) * 100)}%` }}
+                  />
+                </div>
               )}
             </div>
 
             {/* Listing results */}
-            {items.length > 0 && (
+            {(successItems.length > 0 || errorItems.length > 0) && (
               <div className="max-h-64 overflow-y-auto divide-y">
-                {items.map((item, i) => (
+                {successItems.map((item, i) => (
                   <div key={i} className="flex items-center gap-3 px-5 py-3">
-                    {item.type === 'listing' ? (
-                      <>
-                        <CheckCircle className="h-4 w-4 shrink-0 text-green-500" />
-                        <div className="flex-1 min-w-0">
-                          <p className="truncate text-sm font-medium">{item.title}</p>
-                          <p className="text-xs text-muted-foreground">${item.price} · Draft created</p>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <X className="h-4 w-4 shrink-0 text-destructive" />
-                        <p className="text-sm text-muted-foreground truncate">{item.message}</p>
-                      </>
-                    )}
+                    <CheckCircle className="h-4 w-4 shrink-0 text-green-500" />
+                    <div className="flex-1 min-w-0">
+                      <p className="truncate text-sm font-medium">{item.title}</p>
+                      <p className="text-xs text-muted-foreground">${item.price} · Draft created</p>
+                    </div>
+                  </div>
+                ))}
+                {errorItems.map((item, i) => (
+                  <div key={`e${i}`} className="flex items-center gap-3 px-5 py-3">
+                    <X className="h-4 w-4 shrink-0 text-destructive" />
+                    <p className="text-sm text-muted-foreground truncate">{item.error}</p>
                   </div>
                 ))}
               </div>
             )}
 
             {/* Footer */}
-            {phase === 'done' && (
+            {isDone && (
               <div className="flex justify-end gap-2 border-t px-5 py-4">
                 <Button variant="outline" size="sm" onClick={handleClose}>Close</Button>
                 <Button size="sm" asChild>

@@ -125,3 +125,16 @@ enum ListingStatus {
   ENDED
   RELISTED
 }
+
+model BulkJob {
+  id          String   @id @default(cuid())
+  status      String   @default("processing") // "processing" | "done" | "error"
+  phase       String   @default("uploading")  // "uploading" | "grouping" | "building" | "done"
+  totalPhotos Int      @default(0)
+  totalGroups Int      @default(0)
+  created     Int      @default(0)
+  results     Json     @default("[]")         // JobResult[]
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { withRetry } from './retry'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -57,7 +58,7 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
   }))
 
   try {
-    const response = await client.messages.create({
+    const response = await withRetry(() => client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 768,
       messages: [
@@ -90,7 +91,7 @@ Return ONLY a JSON array, no explanation:
           ],
         },
       ],
-    })
+    }), 'group')
 
     const text = response.content.find((b) => b.type === 'text')?.text ?? ''
     const match = text.match(/\[[\s\S]*\]/)
