@@ -65,10 +65,18 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const processFiles = useCallback(async (files: File[]) => {
+  const [truncationNote, setTruncationNote] = useState<string | null>(null)
+
+  const processFiles = useCallback(async (allFiles: File[]) => {
+    const MAX_FILES = 80
+    const files = allFiles.slice(0, MAX_FILES)
+    const truncated = allFiles.length > MAX_FILES
+
     setIsOpen(true)
     setPhase('uploading')
     setItems([])
+    setTruncationNote(truncated ? `${allFiles.length} photos selected — processing first ${MAX_FILES}` : null)
+    setBuildProgress({ current: 0, total: 0 })
     setCreatedIds([])
     setUploadProgress({ uploaded: 0, total: files.length })
     setBuildProgress({ current: 0, total: 0 })
@@ -219,6 +227,9 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
             {/* Phase label */}
             <div className="px-5 py-3 text-sm text-muted-foreground border-b bg-muted/30">
               {phaseLabel}
+              {truncationNote && (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{truncationNote}</p>
+              )}
             </div>
 
             {/* Listing results */}
