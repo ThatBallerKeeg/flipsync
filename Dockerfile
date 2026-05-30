@@ -42,4 +42,4 @@ ENV PORT=3000
 # migration (8-digit name) created the table, then a rename to 14-digit caused
 # a duplicate-table failure and left P3009 stuck. || true so future deploys
 # don't fail once the migration is in a clean state.
-CMD ["sh", "-c", "npx prisma migrate resolve --applied 20260529000000_add_bulk_job 2>/dev/null || true && npx prisma migrate deploy && pnpm start"]
+CMD ["sh", "-c", "npx prisma migrate deploy && pnpm start"]
