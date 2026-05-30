@@ -114,14 +114,25 @@ async function processJob(jobId: string, urls: string[]) {
       // Identify item (Sonnet, with rate-limit retry baked into identifyItemFromImage)
       const id = await identifyItemFromImage(groupUrls)
 
-      // Price suggestion (best-effort — never fails the listing)
-      const itemQuery = [id.brand, id.item_type, id.model_name].filter(Boolean).join(' ')
-      let price = 25
+      // Price suggestion — log every failure so we can debug why all listings end up $25
+      const itemQuery = [id.brand, id.item_type, id.model_name].filter(Boolean).join(' ').trim() || group.hint
+      let price = heuristicPrice(id)
+      let comps: Awaited<ReturnType<typeof searchComparables>> = []
       try {
-        const comps = await searchComparables(itemQuery)
+        comps = await searchComparables(itemQuery)
+      } catch (e) {
+        console.warn(`[bulk-build] searchComparables failed for "${itemQuery}":`, e instanceof Error ? e.message : e)
+      }
+      try {
         const valuation = await synthesizeValuation(itemQuery, id.condition ?? 'good', comps)
-        if (valuation.mid > 0) price = Math.round(valuation.mid)
-      } catch { /* use $25 default */ }
+        if (valuation.mid > 0) {
+          price = Math.round(valuation.mid)
+        } else {
+          console.warn(`[bulk-build] valuation.mid was 0 for "${itemQuery}" (${comps.length} comps), using heuristic $${price}`)
+        }
+      } catch (e) {
+        console.warn(`[bulk-build] synthesizeValuation failed for "${itemQuery}":`, e instanceof Error ? e.message : e)
+      }
 
       const description = buildDescription(id)
       const title =
@@ -172,6 +183,46 @@ async function processJob(jobId: string, urls: string[]) {
     where: { id: jobId },
     data: { status: 'done', phase: 'done' },
   })
+}
+
+/**
+ * Fallback pricing when comparables search or AI valuation fails.
+ * Varies by item type + brand tier + condition so listings don't all land on the same number.
+ * The user can edit each price afterwards — this just avoids the "everything is $25" complaint.
+ */
+function heuristicPrice(id: AIIdentifyResult): number {
+  const type = (id.item_type ?? '').toLowerCase()
+  const brand = (id.brand ?? '').toLowerCase()
+  const condition = id.condition ?? 'good'
+
+  // Base price by item category
+  let base = 22
+  if (/jacket|coat|blazer/.test(type))   base = 45
+  else if (/hoodie|sweatshirt|sweater/.test(type)) base = 32
+  else if (/jean|denim|pant|trouser|cargo/.test(type)) base = 28
+  else if (/dress|skirt/.test(type))     base = 30
+  else if (/shoe|sneaker|boot/.test(type)) base = 40
+  else if (/bag|backpack|purse/.test(type)) base = 35
+  else if (/tee|t-shirt|shirt|top|jersey/.test(type)) base = 22
+  else if (/short/.test(type))           base = 20
+  else if (/hat|cap|beanie/.test(type))  base = 18
+
+  // Brand multiplier — premium brands command higher resale
+  const premium = ['carhartt', 'stussy', 'supreme', 'palace', 'nike', 'adidas', 'patagonia', 'north face', 'arc\'teryx', 'arcteryx', 'levi', 'polo ralph lauren', 'tommy hilfiger', 'jordan', 'yeezy', 'bape']
+  const luxe = ['gucci', 'prada', 'louis vuitton', 'balenciaga', 'fendi', 'dior', 'celine', 'saint laurent', 'chanel', 'burberry']
+  if (luxe.some(b => brand.includes(b)))         base = Math.round(base * 2.5)
+  else if (premium.some(b => brand.includes(b))) base = Math.round(base * 1.5)
+
+  // Condition adjustment
+  const condMult: Record<string, number> = {
+    new_with_tags: 1.2,
+    excellent:     1.0,
+    good:          0.85,
+    fair:          0.65,
+    poor:          0.45,
+  }
+  const mult = condMult[condition] ?? 0.85
+  return Math.max(10, Math.round(base * mult))
 }
 
 function buildDescription(id: AIIdentifyResult): string {

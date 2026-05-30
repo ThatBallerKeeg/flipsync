@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { withRetry } from './retry'
 import { toImageBlock } from './image-blocks'
+import { parseClaudeJson } from './parse-json'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -29,8 +30,9 @@ export async function groupPhotosByItem(urls: string[]): Promise<PhotoGroup[]> {
     return [{ photoIndices: indices, selectedIndices: indices, hint: 'item' }]
   }
 
-  // Claude handles up to 20 images per call; batch larger sets
-  const BATCH = 20
+  // Batch size 12 — Sonnet is much more accurate at distinguishing items
+  // when given fewer images per call (Haiku at 20 over-groups visually similar items).
+  const BATCH = 12
   if (urls.length > BATCH) {
     const allGroups: PhotoGroup[] = []
     let offset = 0
@@ -58,8 +60,9 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
 
   try {
     const response = await withRetry(() => client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 768,
+      // Sonnet — Haiku consistently merges visually-similar but distinct items into one group
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
       messages: [
         {
           role: 'user',
@@ -67,25 +70,26 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
             ...imageBlocks,
             {
               type: 'text',
-              text: `These are ${urls.length} resale product photos (indices 0–${urls.length - 1}). Do two things:
+              text: `These are ${urls.length} resale product photos (indices 0–${urls.length - 1}).
 
-1. GROUP by clothing item — photos of the same item from different angles belong together.
+GROUPING RULES — read carefully:
+- Each photo shows ONE physical item.
+- Only group photos together if you are CONFIDENT they show the EXACT SAME physical object (same garment, same wear marks, same exact fabric/print/details).
+- Two shirts of the same brand or style but with different graphics, colors, sizes, or visible details are DIFFERENT items → separate groups.
+- When in doubt → SPLIT into separate groups. False merges (different items grouped together) are worse than false splits.
+- Typical: each item has 1–4 photos (front, back, tag/label, detail). Groups of 6+ photos for one item are very rare.
 
-2. SELECT the best ≤4 photos per group for a Depop listing. Prefer photos with:
-   - Good, even lighting (not dark, shadowy, or blown-out)
-   - Sharp focus (not blurry)
-   - Clean or neutral background
-   - Varied angles (ideally: front, back, tag/label, detail shot)
-   - Avoid picking near-identical shots — diversity over quantity
+Then SELECT the best ≤4 photos per group, preferring: even lighting, sharp focus, clean background, varied angles, no near-duplicates.
 
-Return ONLY a JSON array, no explanation:
+Return ONLY a JSON array (no prose, no markdown fences):
 [
-  {"indices":[0,1,2,3,4],"selected":[0,2,4],"hint":"navy hoodie"},
-  {"indices":[5,6],"selected":[5,6],"hint":"black cargo pants"}
+  {"indices":[0,1,2],"selected":[0,1,2],"hint":"navy Carhartt hoodie"},
+  {"indices":[3,4],"selected":[3,4],"hint":"black cargo pants"},
+  {"indices":[5],"selected":[5],"hint":"red graphic tee"}
 ]
 
-"indices" = ALL photos of that item (every index that belongs to it)
-"selected" = the best ones to use, max 4, must be a subset of "indices"`,
+EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
+"selected" must be a subset of "indices", max 4.`,
             },
           ],
         },
@@ -93,15 +97,15 @@ Return ONLY a JSON array, no explanation:
     }), 'group')
 
     const text = response.content.find((b) => b.type === 'text')?.text ?? ''
-    const match = text.match(/\[[\s\S]*\]/)
-    if (!match) return fallbackChunks(urls.length)
-
-    const parsed = JSON.parse(match[0]) as Array<{
+    const parsed = parseClaudeJson<Array<{
       indices: number[]
       selected?: number[]
       hint: string
-    }>
-    if (!Array.isArray(parsed) || parsed.length === 0) return fallbackChunks(urls.length)
+    }>>(text, 'array')
+    if (!parsed || !Array.isArray(parsed) || parsed.length === 0) {
+      console.warn(`[group] Unparseable response, falling back to chunks: ${text.slice(0, 120)}`)
+      return fallbackChunks(urls.length)
+    }
 
     return parsed
       .map((g) => {

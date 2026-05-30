@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { AIIdentifyResult } from '@/types'
 import { withRetry } from './retry'
 import { toImageBlock } from './image-blocks'
+import { parseClaudeJson } from './parse-json'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -44,12 +45,16 @@ Return ONLY valid JSON, no prose, no markdown fences.`,
     ],
   }), 'identify')
 
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '{}'
-  const match = text.match(/\{[\s\S]*\}/)
-  const data = (match ? JSON.parse(match[0]) : {}) as AIIdentifyResult
+  const text = response.content.find((b) => b.type === 'text')?.text ?? ''
+  const parsed = parseClaudeJson<AIIdentifyResult>(text, 'object')
 
-  if (!data.colors && data.color) data.colors = [data.color]
-  if (!data.color && data.colors?.[0]) data.color = data.colors[0]
+  if (!parsed) {
+    console.warn(`[identify] Unparseable response: ${text.slice(0, 150)}`)
+    return {} as AIIdentifyResult
+  }
 
-  return data
+  if (!parsed.colors && parsed.color) parsed.colors = [parsed.color]
+  if (!parsed.color && parsed.colors?.[0]) parsed.color = parsed.colors[0]
+
+  return parsed
 }
