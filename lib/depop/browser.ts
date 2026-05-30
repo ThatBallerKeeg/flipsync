@@ -121,14 +121,29 @@ export async function createDepopListingBrowser(
       timeout: 30000,
     })
 
-    // Verify we're on the right page
+    // Verify we're on the right page — check for auth redirect
     const currentUrl = page.url()
-    if (currentUrl.includes('/login') || currentUrl.includes('/signup')) {
+    if (currentUrl.includes('/login') || currentUrl.includes('/signup') || currentUrl.includes('auth')) {
       throw new Error('Depop session expired — please reconnect your account in Settings.')
     }
+    // If still got redirected away from create page for other reason, surface it
+    if (!currentUrl.includes('/products/create') && !currentUrl.includes('/sell')) {
+      console.warn(`[Depop] Unexpected redirect to: ${currentUrl}`)
+      if (currentUrl.includes('/login') || !currentUrl.includes('depop.com')) {
+        throw new Error(`Depop redirected unexpectedly to ${currentUrl} — session may be expired`)
+      }
+    }
 
-    // Wait for the upload input to confirm form is rendered
-    await page.waitForSelector('[data-testid="upload-input__input"]', { timeout: 15000 })
+    // Wait for the file input — Depop periodically renames data-testid attributes,
+    // so try the known ID first then fall back to generic file inputs.
+    const FILE_INPUT_SELECTOR = [
+      '[data-testid="upload-input__input"]',
+      'input[type="file"][accept*="image"]',
+      'input[type="file"][multiple]',
+      'input[type="file"]',
+    ].join(', ')
+
+    await page.waitForSelector(FILE_INPUT_SELECTOR, { timeout: 15000 })
 
     // ─── 1. Upload photos ─────────────────────────────────────────────────────
     const photoUrls = listing.photos.slice(0, 4)
@@ -176,7 +191,7 @@ export async function createDepopListingBrowser(
     if (localPaths.length > 0) {
       // Use Playwright's native setInputFiles — it sets files via CDP at the
       // browser level and fires native change/input events that React handles.
-      const fileInput = page.locator('[data-testid="upload-input__input"]').first()
+      const fileInput = page.locator(FILE_INPUT_SELECTOR).first()
       await fileInput.setInputFiles(localPaths)
 
       // Wait for each photo's upload POST to webapi.depop.com/api/v4/pictures/

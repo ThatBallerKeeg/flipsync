@@ -43,11 +43,21 @@ export async function uploadPhoto(
   // Ensure bucket exists (no-op if already created)
   await supabase.storage.createBucket(BUCKET, { public: true }).catch(() => {})
 
+  // Use Blob — Node.js 20's built-in fetch (undici) handles Blob correctly
+  // for multipart uploads. Passing a raw Buffer causes "fetch failed" because
+  // undici can't determine the content-type boundary for binary Buffer bodies.
+  // Convert to Uint8Array first to satisfy TypeScript's strict ArrayBuffer typing,
+  // then wrap in Blob so Node.js 20's undici fetch handles the binary upload correctly
+  const blob = new Blob([new Uint8Array(correctedBuffer)], { type: contentType })
+
   const { error } = await supabase.storage
     .from(BUCKET)
-    .upload(safeName, correctedBuffer, { contentType, upsert: false })
+    .upload(safeName, blob, { contentType, upsert: false })
 
-  if (error) throw new Error(`Supabase upload failed: ${error.message}`)
+  if (error) {
+    console.error('[Supabase] Upload error details:', JSON.stringify(error))
+    throw new Error(`Supabase upload failed: ${error.message}`)
+  }
 
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(safeName)
   return data.publicUrl
