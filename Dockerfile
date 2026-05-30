@@ -1,8 +1,12 @@
 FROM node:20-slim
 
-# System deps: Python, Playwright browser libs, curl
+# System deps: Python, Playwright browser libs, curl, HEIC support for iPhone photos
 RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv curl \
+    # HEIC/HEIF support for sharp — iPhone photos default to HEIC and need
+    # libheif to be read & rotated correctly. Without this, .heic uploads
+    # silently pass through unrotated.
+    libheif1 libde265-0 \
     # Playwright/Chromium system libs
     libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libdbus-1-3 libexpat1 libxcb1 libxkbcommon0 \

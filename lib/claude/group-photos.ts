@@ -5,14 +5,28 @@ import { parseClaudeJson } from './parse-json'
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
+/** Photo role classification used to order photos in the listing. */
+export type PhotoRole = 'cover' | 'side' | 'flaw' | 'tag' | 'measurement' | 'other'
+
+/** Fixed sort priority. Lower number = earlier in the listing. */
+const ROLE_PRIORITY: Record<PhotoRole, number> = {
+  cover:       0,
+  side:        1,
+  flaw:        2,
+  tag:         3,
+  measurement: 4,
+  other:       5,
+}
+
 export interface PhotoGroup {
   /** All photo indices belonging to this item */
   photoIndices: number[]
   /**
    * Selected indices for the listing, in display order:
-   *   [0] cover (top-down/laid-flat) → [1] side/front/back → flaws (if any)
+   *   cover (top-down/laid-flat) → side/front/back → flaws (if any)
    *   → tag (if visible) → all measurement shots
-   * No cap. Browser automation uses the first 4 for Depop upload.
+   * Order is enforced programmatically from the per-photo role classification,
+   * NOT trusted from Claude's output position.
    */
   selectedIndices: number[]
   hint: string
@@ -75,43 +89,37 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
             ...imageBlocks,
             {
               type: 'text',
-              text: `These are ${urls.length} resale product photos (indices 0–${urls.length - 1}).
+              text: `These are ${urls.length} resale product photos, indices 0–${urls.length - 1}.
 
 ═══ STEP 1: GROUP by physical item ═══
-- Each photo shows ONE physical item.
-- Only group photos together if you are CONFIDENT they show the EXACT SAME physical object (same garment, same wear marks, same exact fabric/print/details).
-- Two shirts of the same brand or style but with different graphics, colors, sizes, or visible details are DIFFERENT items → separate groups.
-- When in doubt → SPLIT into separate groups. False merges are worse than false splits.
-- Typical: each item has 2–6 photos (overhead, side, tag, measurements). Groups of 8+ photos for one item are rare.
+Each photo shows ONE physical item.
+- Group photos together ONLY if you are CONFIDENT they show the EXACT SAME physical object (same garment, same wear marks, same exact fabric/print/details).
+- Two items of the same brand or style with different graphics, colors, sizes, or details are DIFFERENT items → separate groups.
+- When in doubt → SPLIT. False merges are far worse than false splits.
 
-═══ STEP 2: ORDER the "selected" array in this PRIORITY ═══
+═══ STEP 2: For each photo in a group, assign a ROLE ═══
 
-Position 0 (COVER — always include):
-  → Top-down / laid-flat / overhead shot showing the full item from above.
-  → If no overhead shot exists, use the cleanest full-item front view.
+ROLES (use EXACTLY these strings):
+- "cover"       — TOP-DOWN / LAID-FLAT / OVERHEAD shot of the full item, viewed from directly above (item laid on a surface). This is the most important — it becomes the listing's main photo. Pick AT MOST ONE per group.
+- "side"        — front, back, side, 3/4 angle, or any non-overhead full-item view.
+- "flaw"        — close-up of damage, stain, hole, tear, fading, pilling, missing button, etc. ONLY use if the photo actually shows a visible defect.
+- "tag"         — close-up of brand tag, size tag, care label, or interior label.
+- "measurement" — photo featuring a tape measure / ruler measuring a dimension (chest, length, sleeve, waist, inseam, etc.). Use this role for EVERY measurement shot, even if they look similar — they show different dimensions.
+- "other"       — anything else that should still be included but doesn't fit the above.
 
-Position 1 (always include if available):
-  → A side, front, back, or 3/4 angle showing the item's silhouette.
-
-Then, INCLUDE EVERY photo that matches, IN THIS ORDER:
-  → FLAW close-ups (ONLY if the item has visible damage/stains/holes/fading/pilling — many items have none, skip entirely if so)
-  → Brand/size/care TAG close-up (skip if no tag photo)
-  → MEASUREMENT photos (tape-measure shots). Include EVERY measurement shot
-    if multiple exist for different parts (chest, length, sleeve, waist, inseam, etc.).
-    Do NOT dedupe these — different measurements look similar but are distinct.
-
-There is NO minimum and NO maximum. Include every relevant photo from "indices",
-ordered by the priority above. Skip categories that don't apply.
+ROLE RULES:
+- If no photo is clearly top-down, pick the cleanest front-on full-item shot as "cover" and tag the rest as "side".
+- Every photo in a group MUST get a role.
+- Do NOT classify a photo as "flaw" unless there's actually visible damage. Most items have NO flaw photos.
 
 ═══ Return ONLY a JSON array (no prose, no markdown fences) ═══
 [
-  {"indices":[0,1,2],"selected":[2,0,1],"hint":"navy Carhartt hoodie (no flaws)"},
-  {"indices":[3,4,5,6,7,8],"selected":[3,4,5,6,7,8],"hint":"black cargo pants, small hole"},
-  {"indices":[9],"selected":[9],"hint":"red graphic tee"}
+  {"hint":"navy Carhartt hoodie","photos":[{"i":2,"role":"cover"},{"i":0,"role":"side"},{"i":1,"role":"tag"}]},
+  {"hint":"black cargo pants","photos":[{"i":3,"role":"cover"},{"i":4,"role":"side"},{"i":5,"role":"flaw"},{"i":6,"role":"tag"},{"i":7,"role":"measurement"},{"i":8,"role":"measurement"}]},
+  {"hint":"red graphic tee","photos":[{"i":9,"role":"cover"}]}
 ]
 
-EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
-"selected" is a subset of "indices", ordered by priority.`,
+EVERY index 0–${urls.length - 1} must appear in exactly one group's "photos".`,
             },
           ],
         },
@@ -120,9 +128,8 @@ EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
 
     const text = response.content.find((b) => b.type === 'text')?.text ?? ''
     const parsed = parseClaudeJson<Array<{
-      indices: number[]
-      selected?: number[]
-      hint: string
+      hint?: string
+      photos: Array<{ i: number; role: string }>
     }>>(text, 'array')
     if (!parsed || !Array.isArray(parsed) || parsed.length === 0) {
       console.warn(`[group] Unparseable response, falling back to chunks: ${text.slice(0, 120)}`)
@@ -131,28 +138,55 @@ EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
 
     return parsed
       .map((g) => {
-        const allIndices = (g.indices ?? []).filter(
-          (i) => typeof i === 'number' && i >= 0 && i < urls.length
-        )
-        // Validate selected: must be a subset of allIndices, preserve Claude's ordering.
-        // Dedupe (preserving first occurrence) so duplicates from a noisy response
-        // don't waste slots. No max/min — caller decides what to do with the list.
+        // Validate & dedupe — keep first occurrence of each index
         const seen = new Set<number>()
-        const rawSelected = (g.selected ?? allIndices).filter((i) => {
-          if (typeof i !== 'number' || !allIndices.includes(i) || seen.has(i)) return false
-          seen.add(i)
+        const photos = (g.photos ?? []).filter((p) => {
+          if (!p || typeof p.i !== 'number' || p.i < 0 || p.i >= urls.length) return false
+          if (seen.has(p.i)) return false
+          seen.add(p.i)
           return true
         })
-        const selectedIndices = rawSelected.length > 0 ? rawSelected : allIndices
 
+        const isRole = (r: string): r is PhotoRole =>
+          r === 'cover' || r === 'side' || r === 'flaw' || r === 'tag' || r === 'measurement' || r === 'other'
+
+        // Ensure EXACTLY ONE cover. If Claude picked multiple, demote extras to "side".
+        // If Claude picked none, promote the first "side" (or first photo) to cover.
+        let coverSeen = false
+        const typed = photos.map((p) => {
+          const role: PhotoRole = isRole(p.role) ? p.role : 'other'
+          if (role === 'cover') {
+            if (coverSeen) return { i: p.i, role: 'side' as PhotoRole }
+            coverSeen = true
+          }
+          return { i: p.i, role }
+        })
+        if (!coverSeen && typed.length > 0) {
+          const promoteIdx = typed.findIndex((p) => p.role === 'side') !== -1
+            ? typed.findIndex((p) => p.role === 'side')
+            : 0
+          typed[promoteIdx] = { ...typed[promoteIdx], role: 'cover' }
+        }
+
+        // Sort: cover → side → flaw → tag → measurement → other.
+        // Within each role, preserve Claude's original output order (stable sort).
+        const sorted = typed
+          .map((p, originalPos) => ({ ...p, originalPos }))
+          .sort((a, b) => {
+            const diff = ROLE_PRIORITY[a.role] - ROLE_PRIORITY[b.role]
+            return diff !== 0 ? diff : a.originalPos - b.originalPos
+          })
+
+        const allIndices = sorted.map((p) => p.i)
         return {
           photoIndices: allIndices,
-          selectedIndices,
+          selectedIndices: allIndices,  // already ordered correctly
           hint: g.hint ?? 'item',
         }
       })
       .filter((g) => g.photoIndices.length > 0)
-  } catch {
+  } catch (e) {
+    console.warn('[group] Exception during groupBatch, falling back to chunks:', e instanceof Error ? e.message : e)
     return fallbackChunks(urls.length)
   }
 }

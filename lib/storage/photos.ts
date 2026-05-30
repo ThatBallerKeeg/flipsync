@@ -26,15 +26,23 @@ function getSupabaseConfig() {
  * Result: a ~300 KB JPEG that displays correctly in EVERY viewer without
  * relying on the orientation tag.
  */
-async function processPhotoForUpload(buffer: Buffer): Promise<Buffer> {
+async function processPhotoForUpload(buffer: Buffer, originalName?: string): Promise<Buffer> {
   try {
-    return await sharp(buffer, { failOn: 'none' })
-      .rotate()
+    const img = sharp(buffer, { failOn: 'none' })
+    // Log the original metadata so we can verify rotation is being applied
+    const meta = await img.metadata()
+    const orientation = meta.orientation ?? 1
+    if (orientation !== 1 && orientation !== undefined) {
+      console.log(`[photos] ${originalName ?? 'photo'} orientation=${orientation} format=${meta.format} — rotating`)
+    }
+    return await img
+      .rotate()                                              // bakes EXIF Orientation into pixels
       .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 78, mozjpeg: true })
+      .jpeg({ quality: 78, mozjpeg: true })                  // strips remaining metadata
       .toBuffer()
-  } catch {
-    return buffer   // non-image or corrupt — pass through as-is
+  } catch (e) {
+    console.warn(`[photos] sharp pipeline failed for ${originalName ?? 'photo'}, passing through raw:`, e instanceof Error ? e.message : e)
+    return buffer
   }
 }
 
@@ -67,8 +75,8 @@ export async function uploadPhoto(
   contentType: string
 ): Promise<string> {
   const { url, key } = getSupabaseConfig()
-  const processed = await processPhotoForUpload(buffer)
-  const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+  const processed = await processPhotoForUpload(buffer, filename)
+  const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.heic$/i, '.jpg')}`
   const uploadUrl = `${url}/storage/v1/object/${BUCKET}/${safeName}`
 
   let res: Response

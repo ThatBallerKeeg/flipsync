@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Link from 'next/link'
-import { Plus, Edit, Trash2, RefreshCw } from 'lucide-react'
+import { Plus, Edit, Trash2, RefreshCw, Trash } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -29,6 +29,7 @@ function statusLabel(status: string) {
 export default function ListingsPage() {
   const queryClient = useQueryClient()
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [confirmDeleteDrafts, setConfirmDeleteDrafts] = useState(false)
   const [syncing, setSyncing] = useState(false)
 
   const { data: allListings = [], isLoading } = useQuery<Listing[]>({
@@ -46,6 +47,23 @@ export default function ListingsPage() {
       setConfirmDeleteId(null)
     },
   })
+
+  const deleteAllDraftsMutation = useMutation({
+    mutationFn: () =>
+      fetch('/api/listings/drafts', { method: 'DELETE' }).then((r) => r.json()),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['listings'] })
+      setConfirmDeleteDrafts(false)
+      if (typeof data?.deleted === 'number') {
+        alert(`Deleted ${data.deleted} draft listing${data.deleted === 1 ? '' : 's'}.`)
+      }
+    },
+    onError: (e: Error) => {
+      alert(`Failed to delete drafts: ${e.message}`)
+    },
+  })
+
+  const draftCount = listings.filter((l) => l.status === 'DRAFT').length
 
   async function syncDepop() {
     setSyncing(true)
@@ -97,9 +115,46 @@ export default function ListingsPage() {
         </div>
       )}
 
+      {/* Confirm delete all drafts dialog */}
+      {confirmDeleteDrafts && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm rounded-lg border bg-card p-5 shadow-lg space-y-4">
+            <h2 className="text-base font-semibold">Delete all {draftCount} draft{draftCount === 1 ? '' : 's'}?</h2>
+            <p className="text-sm text-muted-foreground">
+              This permanently deletes every draft listing and removes their photos from storage.
+              ACTIVE, SOLD, and ENDED listings are NOT touched.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setConfirmDeleteDrafts(false)}>Cancel</Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={deleteAllDraftsMutation.isPending}
+                onClick={() => deleteAllDraftsMutation.mutate()}
+              >
+                {deleteAllDraftsMutation.isPending ? 'Deleting…' : `Delete ${draftCount} draft${draftCount === 1 ? '' : 's'}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{listings.length} listings</p>
+        <p className="text-sm text-muted-foreground">
+          {listings.length} listings{draftCount > 0 ? ` · ${draftCount} draft${draftCount === 1 ? '' : 's'}` : ''}
+        </p>
         <div className="flex gap-2">
+          {draftCount > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:text-destructive border-destructive/30 hover:border-destructive/50"
+              onClick={() => setConfirmDeleteDrafts(true)}
+            >
+              <Trash className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">Delete all drafts</span>
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={syncDepop} disabled={syncing}>
             <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''} sm:mr-1`} />
             <span className="hidden sm:inline">{syncing ? 'Syncing…' : 'Sync Depop'}</span>
