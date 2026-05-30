@@ -88,14 +88,22 @@ export async function POST(req: NextRequest) {
         let created = 0
         for (let i = 0; i < groups.length; i++) {
           const group = groups[i]
-          const groupUrls = group.photoIndices
+          // selectedIndices = best ≤4 photos chosen by Claude for quality/variety
+          // photoIndices   = all photos of this item (kept on the listing)
+          const selectedUrls = group.selectedIndices
             .map((idx) => uploadedUrls[idx])
             .filter(Boolean)
+          const allGroupUrls = group.photoIndices
+            .map((idx) => uploadedUrls[idx])
+            .filter(Boolean)
+
+          // Use selectedUrls for both identification and the listing (they're the best shots)
+          const groupUrls = selectedUrls.length > 0 ? selectedUrls : allGroupUrls
 
           if (!groupUrls.length) continue
 
           try {
-            // Identify item
+            // Identify item using the curated best photos
             const id = await identifyItemFromImage(groupUrls)
 
             // Get price suggestion (best-effort)

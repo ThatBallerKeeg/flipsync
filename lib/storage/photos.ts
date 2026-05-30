@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import sharp from 'sharp'
 
 const BUCKET = 'listing-photos'
 
@@ -10,12 +11,33 @@ function getClient() {
   return createClient(url, key)
 }
 
+/**
+ * Auto-rotate a photo buffer using its EXIF orientation tag, then strip the tag.
+ * Phone photos are frequently stored sideways with an EXIF flag saying "rotate me"
+ * — many viewers honour the flag but Depop's CDN does not, so we bake the rotation
+ * into the pixels before upload.
+ */
+export async function fixOrientation(buffer: Buffer): Promise<Buffer> {
+  try {
+    return await sharp(buffer)
+      .rotate()          // reads EXIF Orientation, rotates pixels, removes the tag
+      .withMetadata({ orientation: undefined })  // strip residual orientation
+      .toBuffer()
+  } catch {
+    return buffer        // non-image or corrupt — return as-is
+  }
+}
+
 export async function uploadPhoto(
   buffer: Buffer,
   filename: string,
   contentType: string
 ): Promise<string> {
   const supabase = getClient()
+
+  // Fix EXIF rotation before upload so the image displays correctly everywhere
+  const correctedBuffer = await fixOrientation(buffer)
+
   const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
 
   // Ensure bucket exists (no-op if already created)
@@ -23,7 +45,7 @@ export async function uploadPhoto(
 
   const { error } = await supabase.storage
     .from(BUCKET)
-    .upload(safeName, buffer, { contentType, upsert: false })
+    .upload(safeName, correctedBuffer, { contentType, upsert: false })
 
   if (error) throw new Error(`Supabase upload failed: ${error.message}`)
 

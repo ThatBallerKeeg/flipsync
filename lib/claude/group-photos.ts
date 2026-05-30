@@ -3,25 +3,31 @@ import Anthropic from '@anthropic-ai/sdk'
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 export interface PhotoGroup {
+  /** All photo indices belonging to this item */
   photoIndices: number[]
+  /** Best ≤4 indices to use for the listing and AI identification */
+  selectedIndices: number[]
   hint: string
 }
 
 /**
- * Uses Claude Vision to group a set of uploaded photo URLs by which
- * clothing item they show. Photos of the same item from different angles
- * are clustered together. Falls back to sequential chunks of 4 if Claude
- * can't parse a valid grouping.
+ * Uses Claude Vision to:
+ *   1. Group a set of uploaded photo URLs by which clothing item they show
+ *   2. Within each group, select the best ≤4 photos based on quality
+ *      (lighting, focus, background, angle variety — avoids near-duplicates)
+ *
+ * Falls back to sequential chunks of 4 if Claude returns an unparseable response.
  */
 export async function groupPhotosByItem(urls: string[]): Promise<PhotoGroup[]> {
   if (urls.length === 0) return []
 
-  // Single photo or ≤4 photos — treat as one item
+  // ≤4 photos — one item, use all of them
   if (urls.length <= 4) {
-    return [{ photoIndices: urls.map((_, i) => i), hint: 'item' }]
+    const indices = urls.map((_, i) => i)
+    return [{ photoIndices: indices, selectedIndices: indices, hint: 'item' }]
   }
 
-  // Claude can handle up to 20 images in one call; process in batches if needed
+  // Claude handles up to 20 images per call; batch larger sets
   const BATCH = 20
   if (urls.length > BATCH) {
     const allGroups: PhotoGroup[] = []
@@ -29,10 +35,10 @@ export async function groupPhotosByItem(urls: string[]): Promise<PhotoGroup[]> {
     for (let i = 0; i < urls.length; i += BATCH) {
       const batch = urls.slice(i, i + BATCH)
       const batchGroups = await groupBatch(batch)
-      // Adjust indices to be relative to the full array
       for (const g of batchGroups) {
         allGroups.push({
-          photoIndices: g.photoIndices.map((idx) => idx + offset),
+          photoIndices:   g.photoIndices.map((idx) => idx + offset),
+          selectedIndices: g.selectedIndices.map((idx) => idx + offset),
           hint: g.hint,
         })
       }
@@ -53,7 +59,7 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
+      max_tokens: 768,
       messages: [
         {
           role: 'user',
@@ -61,10 +67,25 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
             ...imageBlocks,
             {
               type: 'text',
-              text: `These are ${urls.length} product photos (indices 0–${urls.length - 1}). Group them by clothing item — multiple angles of the SAME item belong in the same group. Each item may have 1–6 photos.
+              text: `These are ${urls.length} resale product photos (indices 0–${urls.length - 1}). Do two things:
+
+1. GROUP by clothing item — photos of the same item from different angles belong together.
+
+2. SELECT the best ≤4 photos per group for a Depop listing. Prefer photos with:
+   - Good, even lighting (not dark, shadowy, or blown-out)
+   - Sharp focus (not blurry)
+   - Clean or neutral background
+   - Varied angles (ideally: front, back, tag/label, detail shot)
+   - Avoid picking near-identical shots — diversity over quantity
 
 Return ONLY a JSON array, no explanation:
-[{"indices":[0,1,2],"hint":"navy hoodie"},{"indices":[3,4],"hint":"black cargo pants"}]`,
+[
+  {"indices":[0,1,2,3,4],"selected":[0,2,4],"hint":"navy hoodie"},
+  {"indices":[5,6],"selected":[5,6],"hint":"black cargo pants"}
+]
+
+"indices" = ALL photos of that item (every index that belongs to it)
+"selected" = the best ones to use, max 4, must be a subset of "indices"`,
             },
           ],
         },
@@ -75,13 +96,32 @@ Return ONLY a JSON array, no explanation:
     const match = text.match(/\[[\s\S]*\]/)
     if (!match) return fallbackChunks(urls.length)
 
-    const parsed = JSON.parse(match[0]) as Array<{ indices: number[]; hint: string }>
+    const parsed = JSON.parse(match[0]) as Array<{
+      indices: number[]
+      selected?: number[]
+      hint: string
+    }>
     if (!Array.isArray(parsed) || parsed.length === 0) return fallbackChunks(urls.length)
 
-    return parsed.map((g) => ({
-      photoIndices: (g.indices ?? []).filter((i) => typeof i === 'number' && i < urls.length),
-      hint: g.hint ?? 'item',
-    })).filter((g) => g.photoIndices.length > 0)
+    return parsed
+      .map((g) => {
+        const allIndices = (g.indices ?? []).filter(
+          (i) => typeof i === 'number' && i >= 0 && i < urls.length
+        )
+        // Validate selected: must be a subset of allIndices, max 4
+        const rawSelected = (g.selected ?? allIndices).filter(
+          (i) => typeof i === 'number' && allIndices.includes(i)
+        )
+        const selectedIndices =
+          rawSelected.length > 0 ? rawSelected.slice(0, 4) : allIndices.slice(0, 4)
+
+        return {
+          photoIndices: allIndices,
+          selectedIndices,
+          hint: g.hint ?? 'item',
+        }
+      })
+      .filter((g) => g.photoIndices.length > 0)
   } catch {
     return fallbackChunks(urls.length)
   }
@@ -90,10 +130,8 @@ Return ONLY a JSON array, no explanation:
 function fallbackChunks(count: number): PhotoGroup[] {
   const groups: PhotoGroup[] = []
   for (let i = 0; i < count; i += 4) {
-    groups.push({
-      photoIndices: Array.from({ length: Math.min(4, count - i) }, (_, j) => i + j),
-      hint: `item ${groups.length + 1}`,
-    })
+    const indices = Array.from({ length: Math.min(4, count - i) }, (_, j) => i + j)
+    groups.push({ photoIndices: indices, selectedIndices: indices, hint: `item ${groups.length + 1}` })
   }
   return groups
 }
