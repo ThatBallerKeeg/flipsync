@@ -5,7 +5,8 @@
  *
  * Runs every hour on the hour. Each run checks:
  *   1. Auto-publish: publishes up to N draft listings per day
- *   2. Auto-relist: relists stale active listings older than X days
+ *   2. Auto-relist: relists stale active listings older than X days (peak hours only)
+ *   3. Auto price drop: reduces price on stale listings after X days
  *
  * Calls job functions directly (no HTTP) to avoid Docker networking issues.
  */
@@ -160,47 +161,132 @@ async function runJobs() {
         console.warn('[AutoRelist] Depop sync failed, continuing with cached statuses:', err)
       }
 
-      const staleListings = await prisma.listingPlatform.findMany({
-        where: {
-          platform: 'DEPOP',
-          platformStatus: 'active',
-          listedAt: { lt: cutoff },
-          listing: { status: 'ACTIVE' },
-        },
-        include: { listing: true },
-        orderBy: { listedAt: 'asc' },
-        take: perDay,
-      })
+      // ── Peak-hour gating ──
+      // Depop's algorithm heavily favors freshly listed items. Relisting during
+      // peak buyer activity maximizes the visibility boost from each relist.
+      // Weekdays 7-9pm PT | Weekends 11am-2pm PT
+      const pacificStr = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false, weekday: 'short' })
+      const [ptWeekday, ptHourStr] = pacificStr.split(', ')
+      const ptHour = parseInt(ptHourStr, 10)
+      const isWeekend = ptWeekday === 'Sat' || ptWeekday === 'Sun'
+      const isPeakHour = isWeekend
+        ? (ptHour >= 11 && ptHour < 14)  // 11am-2pm weekends
+        : (ptHour >= 19 && ptHour < 21)  // 7-9pm weekdays
 
-      console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist`)
+      if (!isPeakHour) {
+        console.log(`[AutoRelist] Skipping — off-peak (${ptHour}:00 PT ${isWeekend ? 'weekend' : 'weekday'}). Peak: ${isWeekend ? '11am-2pm' : '7-9pm'} PT`)
+        results.push('autoRelist(skipped:off-peak)')
+      } else {
+        const staleListings = await prisma.listingPlatform.findMany({
+          where: {
+            platform: 'DEPOP',
+            platformStatus: 'active',
+            listedAt: { lt: cutoff },
+            listing: { status: 'ACTIVE' },
+          },
+          include: { listing: true },
+          orderBy: { listedAt: 'asc' },
+          take: perDay,
+        })
 
-      // Filter out listings marked with hold markers
-      const relistable = staleListings.filter(entry => {
-        const desc = (entry.listing.description ?? '').toLowerCase()
-        if (desc.includes('do not buy') || desc.includes('do not purchase') || desc.includes('not for sale')) {
-          console.log(`[AutoRelist] Skipping ${entry.listingId} — description contains hold marker`)
-          return false
-        }
-        return true
-      })
+        console.log(`[AutoRelist] Found ${staleListings.length} stale listings to relist (peak: ${ptHour}:00 PT)`)
 
-      let relisted = 0
-      for (let i = 0; i < relistable.length; i++) {
-        const entry = relistable[i]
-        try {
-          // Wait 30s between relist attempts to avoid Depop rate-limiting
-          if (i > 0) {
-            console.log(`[AutoRelist] Waiting 30s before next relist...`)
-            await new Promise((r) => setTimeout(r, 30000))
+        // Filter out listings marked with hold markers
+        const relistable = staleListings.filter(entry => {
+          const desc = (entry.listing.description ?? '').toLowerCase()
+          if (desc.includes('do not buy') || desc.includes('do not purchase') || desc.includes('not for sale')) {
+            console.log(`[AutoRelist] Skipping ${entry.listingId} — description contains hold marker`)
+            return false
           }
-          console.log(`[AutoRelist] Relisting ${entry.listingId} (listedAt: ${entry.listedAt?.toISOString()})`)
-          const result = await relistListing(entry.listingId)
-          if (result.success) relisted++
+          return true
+        })
+
+        let relisted = 0
+        for (let i = 0; i < relistable.length; i++) {
+          const entry = relistable[i]
+          try {
+            if (i > 0) {
+              console.log(`[AutoRelist] Waiting 30s before next relist...`)
+              await new Promise((r) => setTimeout(r, 30000))
+            }
+            console.log(`[AutoRelist] Relisting ${entry.listingId} (listedAt: ${entry.listedAt?.toISOString()})`)
+            const result = await relistListing(entry.listingId)
+            if (result.success) relisted++
+          } catch (err) {
+            console.error(`[AutoRelist] Failed for ${entry.listingId}:`, err)
+          }
+        }
+        results.push(`autoRelist(${relisted}/${relistable.length})`)
+      }
+    }
+
+    // ── Auto price drop: reduce price on stale listings that haven't sold ──
+    const [dropPercentSetting, dropAfterDaysSetting] = await Promise.all([
+      prisma.appSettings.findUnique({ where: { key: 'autoPriceDropPercent' } }),
+      prisma.appSettings.findUnique({ where: { key: 'autoPriceDropAfterDays' } }),
+    ])
+    const dropPercent = parseInt(dropPercentSetting?.value ?? '0', 10)
+    const dropAfterDays = parseInt(dropAfterDaysSetting?.value ?? '0', 10)
+
+    if (dropPercent > 0 && dropAfterDays > 0) {
+      const dropCutoff = new Date()
+      dropCutoff.setDate(dropCutoff.getDate() - dropAfterDays)
+      console.log(`[PriceDrop] Config: ${dropPercent}% after ${dropAfterDays} days, cutoff=${dropCutoff.toISOString()}`)
+
+      // Find ACTIVE listings older than the cutoff with no prior price drop
+      // originalPrice being null means the listing has never had a drop applied
+      const staleForDrop = await prisma.listing.findMany({
+        where: {
+          status: 'ACTIVE',
+          originalPrice: null,
+          createdAt: { lt: dropCutoff },
+        },
+        include: { platforms: { where: { platform: 'DEPOP' } } },
+        orderBy: { createdAt: 'asc' },
+        take: 20,
+      })
+
+      let dropped = 0
+      const { depopFetch } = await import('@/lib/depop/client')
+      for (const listing of staleForDrop) {
+        try {
+          const oldPrice = listing.price
+          const newPrice = Math.max(1, Math.round(oldPrice * (1 - dropPercent / 100)))
+          if (newPrice >= oldPrice) continue
+
+          // Persist original price and save new price
+          await prisma.listing.update({
+            where: { id: listing.id },
+            data: { originalPrice: oldPrice, price: newPrice },
+          })
+
+          // Attempt live update on Depop via API
+          const depopPlatform = listing.platforms[0]
+          if (depopPlatform?.platformListingId) {
+            try {
+              const updateRes = await depopFetch(`/products/${depopPlatform.platformListingId}/`, {
+                method: 'PUT',
+                body: { price_amount: String(newPrice) },
+              })
+              if (updateRes.ok) {
+                console.log(`[PriceDrop] ✓ ${listing.title}: $${oldPrice} → $${newPrice} (updated on Depop)`)
+              } else {
+                console.log(`[PriceDrop] ${listing.title}: $${oldPrice} → $${newPrice} (saved locally; Depop API returned ${updateRes.status})`)
+              }
+            } catch {
+              console.log(`[PriceDrop] ${listing.title}: $${oldPrice} → $${newPrice} (saved locally; Depop API unreachable)`)
+            }
+          } else {
+            console.log(`[PriceDrop] ${listing.title}: $${oldPrice} → $${newPrice} (saved locally; no Depop ID)`)
+          }
+          dropped++
         } catch (err) {
-          console.error(`[AutoRelist] Failed for ${entry.listingId}:`, err)
+          console.error(`[PriceDrop] Failed for listing ${listing.id}:`, err)
         }
       }
-      results.push(`autoRelist(${relisted}/${relistable.length})`)
+      if (staleForDrop.length > 0 || dropped > 0) {
+        results.push(`priceDrop(${dropped}/${staleForDrop.length})`)
+      }
     }
 
     console.log('[Scheduler] Done:', results.join(', ') || 'no jobs configured')

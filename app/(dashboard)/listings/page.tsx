@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatCurrency, formatRelativeTime } from '@/lib/utils'
 import { Listing } from '@/types'
+import { BulkDropZone } from '@/components/listing/BulkDropZone'
 
 const statusColors: Record<string, string> = {
   DRAFT: 'secondary',
@@ -107,6 +108,8 @@ export default function ListingsPage() {
           </Button>
         </div>
       </div>
+
+      <BulkDropZone onComplete={() => queryClient.invalidateQueries({ queryKey: ['listings'] })} />
 
       {isLoading ? (
         <div className="space-y-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-16" />)}</div>

@@ -166,10 +166,20 @@ function AutoPublishSettings() {
   const displayRelistDays = relistDays ?? currentRelistDays
   const displayRelistPerDay = relistPerDay ?? currentRelistPerDay
 
+  // Price drop state
+  const currentDropPercent = settings?.autoPriceDropPercent ?? '0'
+  const currentDropAfterDays = settings?.autoPriceDropAfterDays ?? '0'
+  const [dropPercent, setDropPercent] = useState<string | null>(null)
+  const [dropAfterDays, setDropAfterDays] = useState<string | null>(null)
+  const displayDropPercent = dropPercent ?? currentDropPercent
+  const displayDropAfterDays = dropAfterDays ?? currentDropAfterDays
+
   const hasChanges =
     displayPublish !== currentPublish ||
     displayRelistDays !== currentRelistDays ||
-    displayRelistPerDay !== currentRelistPerDay
+    displayRelistPerDay !== currentRelistPerDay ||
+    displayDropPercent !== currentDropPercent ||
+    displayDropAfterDays !== currentDropAfterDays
 
   async function handleSave() {
     if (!hasChanges) return
@@ -179,6 +189,8 @@ function AutoPublishSettings() {
       if (displayPublish !== currentPublish) updates.push({ key: 'autoPublishPerDay', value: displayPublish })
       if (displayRelistDays !== currentRelistDays) updates.push({ key: 'autoRelistAfterDays', value: displayRelistDays })
       if (displayRelistPerDay !== currentRelistPerDay) updates.push({ key: 'autoRelistPerDay', value: displayRelistPerDay })
+      if (displayDropPercent !== currentDropPercent) updates.push({ key: 'autoPriceDropPercent', value: displayDropPercent })
+      if (displayDropAfterDays !== currentDropAfterDays) updates.push({ key: 'autoPriceDropAfterDays', value: displayDropAfterDays })
 
       await Promise.all(
         updates.map((u) =>
@@ -194,6 +206,8 @@ function AutoPublishSettings() {
       setPublishValue(null)
       setRelistDays(null)
       setRelistPerDay(null)
+      setDropPercent(null)
+      setDropAfterDays(null)
     } catch {
       toast({ title: 'Failed to save', variant: 'destructive' })
     } finally {
@@ -269,6 +283,49 @@ function AutoPublishSettings() {
                   {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
                     <SelectItem key={n} value={String(n)}>
                       {n === 0 ? 'Off' : String(n)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Auto price drop */}
+        <div className="space-y-3">
+          <h4 className="text-sm font-medium">Auto Price Drop</h4>
+          <p className="text-xs text-muted-foreground">
+            Automatically reduce the price of items that haven&apos;t sold after a set number of days.
+            The original price is saved so you can see how much it dropped.
+          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="drop-after-days" className="shrink-0 text-sm text-muted-foreground">Drop after</Label>
+              <Select value={displayDropAfterDays} onValueChange={(v) => setDropAfterDays(v)}>
+                <SelectTrigger id="drop-after-days" className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0, 21, 30, 45, 60].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n === 0 ? 'Off' : `${n} days`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="drop-percent" className="shrink-0 text-sm text-muted-foreground">Drop by</Label>
+              <Select value={displayDropPercent} onValueChange={(v) => setDropPercent(v)}>
+                <SelectTrigger id="drop-percent" className="w-24">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[0, 5, 10, 15, 20].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n === 0 ? 'Off' : `${n}%`}
                     </SelectItem>
                   ))}
                 </SelectContent>
