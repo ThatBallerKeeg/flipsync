@@ -35,14 +35,27 @@ export async function uploadPhoto(
   contentType: string
 ): Promise<string> {
   const correctedBuffer = await fixOrientation(buffer)
+
+  // Compress to max 1200px wide, JPEG q72 — reduces a typical 3MB phone photo
+  // to ~150–300KB (10x smaller) so the 500MB Postgres free tier lasts much longer.
+  let finalBuffer: Buffer
+  try {
+    finalBuffer = await sharp(correctedBuffer)
+      .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 72 })
+      .toBuffer()
+  } catch {
+    finalBuffer = correctedBuffer  // non-image or corrupt — store as-is
+  }
+
   const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_')
 
   const photo = await prisma.photo.create({
     data: {
       filename: safeName,
-      contentType,
-      size: correctedBuffer.length,
-      data: new Uint8Array(correctedBuffer),
+      contentType: 'image/jpeg',
+      size: finalBuffer.length,
+      data: new Uint8Array(finalBuffer),
     },
   })
 
