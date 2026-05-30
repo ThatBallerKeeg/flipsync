@@ -14,7 +14,7 @@ export async function identifyItemFromImage(imageUrls: string | string[]): Promi
   const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: `You are an expert reseller and vintage clothing authenticator with deep knowledge of streetwear, vintage, and contemporary fashion brands. Analyse ALL provided product photos together.
+    system: `You are an expert reseller and vintage clothing authenticator with deep knowledge of streetwear, vintage, and contemporary fashion brands AND their typical resale prices on Depop and eBay (US market). Analyse ALL provided product photos together.
 
 Return a single JSON object with these exact fields:
 - brand: brand name (check tags, logos — be specific e.g. "Carhartt", "Nike", "Marvel x Mad Engine")
@@ -29,6 +29,11 @@ Return a single JSON object with these exact fields:
 - tags: array of exactly 5 Depop hashtag keywords WITHOUT # — pick the 5 most impactful (brand, item type, style/era, key feature, aesthetic)
 - suggested_category_depop: best Depop category
 - suggested_title: resale title under 80 chars (brand + item + key detail)
+- estimated_price_usd: integer — your best estimate of what this SPECIFIC item sells for on Depop/eBay in this exact condition. Use real resale market knowledge. A plain Hanes tee in good condition is ~$8-12. A Carhartt heavyweight hoodie is ~$45-70. A Supreme box logo tee is ~$150-300. A Levi's 501 in good condition is ~$25-40. Take CONDITION into account: poor = 40-50% of excellent, fair = 60-70%, good = 80%, new_with_tags = 110-130%.
+- estimated_price_range_usd: [low, high] — your 25th and 75th percentile estimate
+- price_reasoning: ONE short sentence explaining the estimate (e.g. "Vintage Carhartt hoodies in good condition sell $45-65")
+
+CRITICAL: Vary prices honestly based on brand desirability, item type, and condition. Do NOT default to round numbers like $25 or $28 for everything. Generic unbranded items: $8-20. Mid-tier brands (Hanes, Old Navy, Champion basics): $10-25. Premium streetwear (Carhartt, Stussy, Nike SB): $30-90. Hyped (Supreme, Palace, Yeezy, Jordan): $80-400+. Luxury (Gucci, LV, Balenciaga): $200-2000+.
 
 Return ONLY valid JSON, no prose, no markdown fences.`,
     messages: [

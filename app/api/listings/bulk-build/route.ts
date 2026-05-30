@@ -111,28 +111,38 @@ async function processJob(jobId: string, urls: string[]) {
     if (!groupUrls.length) continue
 
     try {
-      // Identify item (Sonnet, with rate-limit retry baked into identifyItemFromImage)
+      // Identify item — Claude now returns estimated_price_usd directly from the photos
+      // based on its training knowledge of Depop/eBay resale prices.
       const id = await identifyItemFromImage(groupUrls)
-
-      // Price suggestion — log every failure so we can debug why all listings end up $25
       const itemQuery = [id.brand, id.item_type, id.model_name].filter(Boolean).join(' ').trim() || group.hint
+
+      // Pricing priority: 1) Claude's vision-based estimate (best), 2) comparables-refined
+      // valuation if Brave returned real comps, 3) heuristic by item type + brand + condition.
       let price = heuristicPrice(id)
-      let comps: Awaited<ReturnType<typeof searchComparables>> = []
-      try {
-        comps = await searchComparables(itemQuery)
-      } catch (e) {
-        console.warn(`[bulk-build] searchComparables failed for "${itemQuery}":`, e instanceof Error ? e.message : e)
+      let priceSource = 'heuristic'
+
+      if (typeof id.estimated_price_usd === 'number' && id.estimated_price_usd >= 5) {
+        price = Math.round(id.estimated_price_usd)
+        priceSource = 'vision'
       }
+
+      // Try to refine with comparables — but ONLY override the vision estimate if the
+      // comparables are real (Brave returned data, not the static mock fallback).
       try {
-        const valuation = await synthesizeValuation(itemQuery, id.condition ?? 'good', comps)
-        if (valuation.mid > 0) {
-          price = Math.round(valuation.mid)
-        } else {
-          console.warn(`[bulk-build] valuation.mid was 0 for "${itemQuery}" (${comps.length} comps), using heuristic $${price}`)
+        const comps = await searchComparables(itemQuery)
+        const isRealData = comps.length >= 3 && new Set(comps.map(c => c.price)).size >= 3
+        if (isRealData) {
+          const valuation = await synthesizeValuation(itemQuery, id.condition ?? 'good', comps)
+          if (valuation.mid > 0 && valuation.confidence >= 0.4) {
+            price = Math.round(valuation.mid)
+            priceSource = `comps(${comps.length})`
+          }
         }
       } catch (e) {
-        console.warn(`[bulk-build] synthesizeValuation failed for "${itemQuery}":`, e instanceof Error ? e.message : e)
+        console.warn(`[bulk-build] comparables/valuation failed for "${itemQuery}":`, e instanceof Error ? e.message : e)
       }
+
+      console.log(`[bulk-build] "${itemQuery}" → $${price} (${priceSource}) | vision est: ${id.estimated_price_usd ?? 'none'}`)
 
       const description = buildDescription(id)
       const title =
@@ -141,12 +151,18 @@ async function processJob(jobId: string, urls: string[]) {
         group.hint ||
         'New Item'
 
+      // Store the high end of Claude's range as originalPrice (a reference, not MSRP)
+      const originalPrice = Array.isArray(id.estimated_price_range_usd)
+        ? Math.round(id.estimated_price_range_usd[1] ?? 0)
+        : undefined
+
       const listing = await prisma.listing.create({
         data: {
           title: title.slice(0, 80),
           description,
           depopDescription: description,
           price,
+          originalPrice: originalPrice && originalPrice > price ? originalPrice : undefined,
           photos: groupUrls,
           brand: id.brand || undefined,
           size: id.size || undefined,

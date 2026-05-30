@@ -92,6 +92,12 @@ export interface AIIdentifyResult {
   tags?: string[]
   suggested_category_depop?: string
   suggested_title?: string
+  /** Claude's typical resale price estimate in USD (median of what this item sells for) */
+  estimated_price_usd?: number
+  /** Claude's estimated price range — [low, high] */
+  estimated_price_range_usd?: [number, number]
+  /** One-line rationale for the price estimate */
+  price_reasoning?: string
 }
 
 export interface PriceSuggestion {
