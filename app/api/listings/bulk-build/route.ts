@@ -35,6 +35,7 @@ type JobResult =
   | { ok: false; error: string; index: number }
 
 export async function POST(req: NextRequest) {
+  try {
   const form = await req.formData()
   const files = form.getAll('photos') as File[]
 
@@ -55,7 +56,10 @@ export async function POST(req: NextRequest) {
     .map((r) => r.value)
 
   if (!urls.length) {
-    return NextResponse.json({ error: 'All photo uploads failed' }, { status: 500 })
+    const firstErr = uploadResults.find((r) => r.status === 'rejected')
+    const reason = firstErr && firstErr.status === 'rejected' ? String(firstErr.reason) : 'unknown'
+    console.error('[bulk-build] All uploads failed:', reason)
+    return NextResponse.json({ error: `All photo uploads failed: ${reason}` }, { status: 500 })
   }
 
   // Create the job record — background worker will update it as it progresses
@@ -77,6 +81,13 @@ export async function POST(req: NextRequest) {
   })
 
   return NextResponse.json({ jobId: job.id, totalPhotos: urls.length })
+  } catch (err: unknown) {
+    console.error('[bulk-build] Unhandled error in POST:', err)
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    )
+  }
 }
 
 async function processJob(jobId: string, urls: string[]) {

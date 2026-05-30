@@ -128,7 +128,12 @@ export function BulkDropZone({ onComplete }: BulkDropZoneProps) {
             try { resolve(JSON.parse(xhr.responseText).jobId) }
             catch { reject(new Error('Invalid server response')) }
           } else {
-            reject(new Error(`Upload failed (${xhr.status})`))
+            try {
+              const body = JSON.parse(xhr.responseText)
+              reject(new Error(body.error ?? `Upload failed (${xhr.status})`))
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`))
+            }
           }
         }
         xhr.onerror = () => reject(new Error('Network error during upload'))
