@@ -10,8 +10,9 @@ export interface PhotoGroup {
   photoIndices: number[]
   /**
    * Selected indices for the listing, in display order:
-   *   [0] cover (top-down/laid-flat) → [1] side/front/back → flaws → tag → measurements
-   * Capped at 6. Browser automation uses the first 4 for Depop upload.
+   *   [0] cover (top-down/laid-flat) → [1] side/front/back → flaws (if any)
+   *   → tag (if visible) → all measurement shots
+   * No cap. Browser automation uses the first 4 for Depop upload.
    */
   selectedIndices: number[]
   hint: string
@@ -20,8 +21,8 @@ export interface PhotoGroup {
 /**
  * Uses Claude Vision to:
  *   1. Group a set of uploaded photo URLs by which clothing item they show
- *   2. Within each group, ORDER the best ≤6 photos in display priority:
- *      top-down (cover) → side angle → flaws → brand/size tag → measurements
+ *   2. Within each group, ORDER all relevant photos in display priority:
+ *      top-down (cover) → side angle → flaws (if any) → brand/size tag → all measurements
  *
  * Falls back to sequential chunks of 4 if Claude returns an unparseable response.
  */
@@ -83,38 +84,34 @@ async function groupBatch(urls: string[]): Promise<PhotoGroup[]> {
 - When in doubt → SPLIT into separate groups. False merges are worse than false splits.
 - Typical: each item has 2–6 photos (overhead, side, tag, measurements). Groups of 8+ photos for one item are rare.
 
-═══ STEP 2: ORDER the "selected" array in STRICT priority order ═══
-Position 0 (the COVER photo):
+═══ STEP 2: ORDER the "selected" array in this PRIORITY ═══
+
+Position 0 (COVER — always include):
   → Top-down / laid-flat / overhead shot showing the full item from above.
   → If no overhead shot exists, use the cleanest full-item front view.
 
-Position 1:
-  → A side, front, back, or 3/4 angle clearly showing the item's silhouette.
+Position 1 (always include if available):
+  → A side, front, back, or 3/4 angle showing the item's silhouette.
 
-Next (one or more):
-  → FLAW close-ups: visible damage, stains, holes, fading, pilling. One per flaw.
-
-Next:
-  → Brand/size/care TAG close-up.
-
-Last (one or more):
-  → MEASUREMENT photos (tape-measure shots). Include EVERY measurement shot if
-    multiple exist for different parts (chest, length, sleeve, waist, inseam, etc.).
+Then, INCLUDE EVERY photo that matches, IN THIS ORDER:
+  → FLAW close-ups (ONLY if the item has visible damage/stains/holes/fading/pilling — many items have none, skip entirely if so)
+  → Brand/size/care TAG close-up (skip if no tag photo)
+  → MEASUREMENT photos (tape-measure shots). Include EVERY measurement shot
+    if multiple exist for different parts (chest, length, sleeve, waist, inseam, etc.).
     Do NOT dedupe these — different measurements look similar but are distinct.
 
-Skip a category if no matching photo exists in this item's group.
-Cap "selected" at 6 photos. If you must drop something, drop in this order:
-extra full-item angles → tag → measurements (keep at least one measurement if any exist).
+There is NO minimum and NO maximum. Include every relevant photo from "indices",
+ordered by the priority above. Skip categories that don't apply.
 
 ═══ Return ONLY a JSON array (no prose, no markdown fences) ═══
 [
-  {"indices":[0,1,2,3],"selected":[2,0,1,3],"hint":"navy Carhartt hoodie"},
-  {"indices":[4,5,6,7,8],"selected":[4,5,7,6,8],"hint":"black cargo pants"},
+  {"indices":[0,1,2],"selected":[2,0,1],"hint":"navy Carhartt hoodie (no flaws)"},
+  {"indices":[3,4,5,6,7,8],"selected":[3,4,5,6,7,8],"hint":"black cargo pants, small hole"},
   {"indices":[9],"selected":[9],"hint":"red graphic tee"}
 ]
 
 EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
-"selected" must be a subset of "indices", in the priority order above, max 6.`,
+"selected" is a subset of "indices", ordered by priority.`,
             },
           ],
         },
@@ -137,17 +134,16 @@ EVERY index 0–${urls.length - 1} must appear in exactly one group's "indices".
         const allIndices = (g.indices ?? []).filter(
           (i) => typeof i === 'number' && i >= 0 && i < urls.length
         )
-        // Validate selected: must be a subset of allIndices, preserve Claude's ordering, cap at 6.
-        // Dedupe while preserving first occurrence so duplicates from a noisy response don't
-        // push a measurement off the end of the list.
+        // Validate selected: must be a subset of allIndices, preserve Claude's ordering.
+        // Dedupe (preserving first occurrence) so duplicates from a noisy response
+        // don't waste slots. No max/min — caller decides what to do with the list.
         const seen = new Set<number>()
         const rawSelected = (g.selected ?? allIndices).filter((i) => {
           if (typeof i !== 'number' || !allIndices.includes(i) || seen.has(i)) return false
           seen.add(i)
           return true
         })
-        const selectedIndices =
-          rawSelected.length > 0 ? rawSelected.slice(0, 6) : allIndices.slice(0, 6)
+        const selectedIndices = rawSelected.length > 0 ? rawSelected : allIndices
 
         return {
           photoIndices: allIndices,
