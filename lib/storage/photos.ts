@@ -1,14 +1,13 @@
-import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
 
 const BUCKET = 'listing-photos'
 
-function getClient() {
+function getSupabaseConfig() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url) throw new Error('NEXT_PUBLIC_SUPABASE_URL is not set')
   if (!key) throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set')
-  return createClient(url, key)
+  return { url: url.replace(/\/+$/, ''), key }
 }
 
 /**
@@ -28,46 +27,67 @@ export async function fixOrientation(buffer: Buffer): Promise<Buffer> {
   }
 }
 
+/**
+ * Uploads a photo to Supabase Storage using the raw REST API instead of the
+ * supabase-js SDK. The SDK wraps fetch errors in a generic "StorageUnknownError"
+ * that hides the actual underlying network error (DNS failure, project paused,
+ * cert issue, etc.). Raw fetch surfaces these clearly so we can fix the root cause.
+ */
 export async function uploadPhoto(
   buffer: Buffer,
   filename: string,
   contentType: string
 ): Promise<string> {
-  const supabase = getClient()
-
-  // Fix EXIF rotation before upload so the image displays correctly everywhere
+  const { url, key } = getSupabaseConfig()
   const correctedBuffer = await fixOrientation(buffer)
-
   const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+  const uploadUrl = `${url}/storage/v1/object/${BUCKET}/${safeName}`
 
-  // Ensure bucket exists (no-op if already created)
-  await supabase.storage.createBucket(BUCKET, { public: true }).catch(() => {})
-
-  // Use Blob — Node.js 20's built-in fetch (undici) handles Blob correctly
-  // for multipart uploads. Passing a raw Buffer causes "fetch failed" because
-  // undici can't determine the content-type boundary for binary Buffer bodies.
-  // Convert to Uint8Array first to satisfy TypeScript's strict ArrayBuffer typing,
-  // then wrap in Blob so Node.js 20's undici fetch handles the binary upload correctly
-  const blob = new Blob([new Uint8Array(correctedBuffer)], { type: contentType })
-
-  const { error } = await supabase.storage
-    .from(BUCKET)
-    .upload(safeName, blob, { contentType, upsert: false })
-
-  if (error) {
-    console.error('[Supabase] Upload error details:', JSON.stringify(error))
-    throw new Error(`Supabase upload failed: ${error.message}`)
+  let res: Response
+  try {
+    res = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': contentType,
+        'x-upsert': 'false',
+        'cache-control': '3600',
+      },
+      body: new Uint8Array(correctedBuffer),
+    })
+  } catch (e: unknown) {
+    // Raw network errors (TypeError: fetch failed) — surface the underlying cause
+    const err = e as Error & { cause?: unknown; code?: string }
+    const causeStr = err.cause
+      ? (typeof err.cause === 'object' ? JSON.stringify(err.cause, Object.getOwnPropertyNames(err.cause)) : String(err.cause))
+      : 'no cause'
+    console.error('[Supabase] Network fetch failed:', err.message, '| cause:', causeStr, '| url:', uploadUrl)
+    throw new Error(`Supabase network error: ${err.message} (${causeStr})`)
   }
 
-  const { data } = supabase.storage.from(BUCKET).getPublicUrl(safeName)
-  return data.publicUrl
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    console.error(`[Supabase] Upload rejected: ${res.status} ${res.statusText} — ${body}`)
+    throw new Error(`Supabase upload failed: ${res.status} ${res.statusText} — ${body.slice(0, 200)}`)
+  }
+
+  // Public URL pattern matches what supabase-js getPublicUrl returns
+  return `${url}/storage/v1/object/public/${BUCKET}/${safeName}`
 }
 
-export async function deletePhoto(url: string): Promise<void> {
-  const supabase = getClient()
+/**
+ * Deletes a photo from Supabase Storage given its public URL.
+ * Best-effort — silently swallows errors.
+ */
+export async function deletePhoto(photoUrl: string): Promise<void> {
+  const { url, key } = getSupabaseConfig()
   const marker = `/storage/v1/object/public/${BUCKET}/`
-  const parts = url.split(marker)
+  const parts = photoUrl.split(marker)
   if (parts.length < 2) return
   const path = parts[1]
-  await supabase.storage.from(BUCKET).remove([path]).catch(() => {})
+
+  await fetch(`${url}/storage/v1/object/${BUCKET}/${path}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${key}` },
+  }).catch(() => {})
 }
