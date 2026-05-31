@@ -86,6 +86,28 @@ async function runJobs() {
       cutoff.setDate(cutoff.getDate() - afterDays)
       console.log(`[AutoRelist] Config: afterDays=${afterDays}, perDay=${perDay}, cutoff=${cutoff.toISOString()}`)
 
+      // Pre-flight: verify the Depop token is decryptable BEFORE doing any expensive
+      // work (photo downloads, Claude description rewrites). If the token is bad,
+      // every relist will fail anyway — short-circuit the relist block (but keep
+      // the PriceDrop logic that runs after it).
+      let depopTokenOk = true
+      try {
+        const { getValidDepopToken } = await import('@/lib/depop/auth')
+        const token = await getValidDepopToken()
+        if (!token) {
+          console.warn('[AutoRelist] Depop not connected — skipping all relists. Reconnect in Settings → Connected Accounts.')
+          results.push('autoRelist(skipped:no-token)')
+          depopTokenOk = false
+        }
+      } catch (e) {
+        console.warn('[AutoRelist] Depop token unusable — skipping all relists:', e instanceof Error ? e.message : e)
+        results.push('autoRelist(skipped:bad-token)')
+        depopTokenOk = false
+      }
+      if (!depopTokenOk) {
+        // jump past the relist block
+      } else {
+
       // Normalize any legacy Depop status codes to human-readable values
       const migratedActive = await prisma.listingPlatform.updateMany({
         where: { platform: 'DEPOP', platformStatus: { in: ['S', 's'] } },
@@ -218,6 +240,7 @@ async function runJobs() {
         }
         results.push(`autoRelist(${relisted}/${relistable.length})`)
       }
+      }  // close else (depopTokenOk)
     }
 
     // ── Auto price drop: reduce price on stale listings that haven't sold ──

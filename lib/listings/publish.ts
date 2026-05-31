@@ -156,7 +156,16 @@ export async function relistListing(
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('401') || msg.includes('session expired')) throw err
+    // Re-throw on any auth-related error so we don't waste Claude API calls on
+    // description rewriting that's destined to fail anyway.
+    if (
+      msg.includes('401') ||
+      msg.includes('session expired') ||
+      msg.includes('could not be decrypted') ||
+      msg.includes('not connected')
+    ) {
+      throw err
+    }
     console.warn(`[Relist] Failed to delete old listing (may already be gone):`, err)
   }
 
