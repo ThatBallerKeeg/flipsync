@@ -830,6 +830,51 @@ export async function createDepopListingBrowser(
       } catch (e) {
         console.warn('[Depop] Package size selection failed:', e)
       }
+
+      // ─── 8b2. Select Shipping method (new Depop requirement) ──────────────
+      // Depop now requires picking a specific carrier service. The exact
+      // option labels vary by account/region, so we just click whatever first
+      // option appears — by this point USPS radio is already selected so the
+      // dropdown is filtered to USPS services only.
+      try {
+        await page.locator('textarea[name="description"]').click().catch(() => null)
+        await page.waitForTimeout(300)
+
+        const shipInput = page.locator('#shippingMethods-input').first()
+        if (await shipInput.count() > 0) {
+          await shipInput.scrollIntoViewIfNeeded().catch(() => null)
+          await shipInput.click()
+          await page.waitForTimeout(800)
+
+          const ariaControls = await shipInput.getAttribute('aria-controls').catch(() => null)
+          let clicked = false
+          if (ariaControls) {
+            const firstOpt = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
+            if (await firstOpt.count() > 0) {
+              const text = await firstOpt.textContent().catch(() => '')
+              await firstOpt.click({ timeout: 3000 }).catch(() => null)
+              console.log(`[Depop] Shipping method: clicked first option "${text?.trim()}"`)
+              clicked = true
+              await page.waitForTimeout(500)
+            }
+          }
+          if (!clicked) {
+            // Keyboard fallback
+            await page.keyboard.press('ArrowDown')
+            await page.waitForTimeout(200)
+            await page.keyboard.press('Enter')
+            await page.waitForTimeout(500)
+            console.log('[Depop] Shipping method: used keyboard fallback')
+          }
+          // Click away to close any open dropdown
+          await page.locator('textarea[name="description"]').click().catch(() => null)
+          await page.waitForTimeout(300)
+        } else {
+          console.log('[Depop] shippingMethods-input not present (legacy form?)')
+        }
+      } catch (e) {
+        console.warn('[Depop] Shipping method selection failed:', e)
+      }
     }
 
     // Health check after shipping
@@ -877,7 +922,26 @@ export async function createDepopListingBrowser(
           'Body fit': { search: 'Oversized', fallbacks: ['Relaxed', 'Regular'] },
           'City': { search: 'Los Angeles', fallbacks: ['New York', 'Chicago', 'Houston'] },
           'Brand': { search: listing.brand ?? 'Vintage', fallbacks: ['Unbranded'] },
+          // Depop's shipping methods combobox — options are USPS service tiers
+          // (USPS Ground Advantage, USPS Priority, etc.) once USPS radio is checked.
+          'Shipping': { search: 'USPS', fallbacks: ['Ground', 'Priority', 'Standard'] },
+          'Shipping methods': { search: 'USPS', fallbacks: ['Ground', 'Priority', 'Standard'] },
+          'Domestic shipping': { search: 'USPS', fallbacks: ['Ground', 'Priority', 'Standard'] },
         }
+
+        // Defaults keyed by inputId substring — caught when the label is
+        // missing or doesn't match a key above. Order matters: more specific first.
+        const ID_DEFAULTS: Array<{ match: RegExp; search: string; fallbacks?: string[] }> = [
+          { match: /shipping/i, search: 'USPS', fallbacks: ['Ground', 'Priority', 'Standard'] },
+          { match: /color|colour/i, search: listing.color ?? 'Black', fallbacks: ['White', 'Grey'] },
+          { match: /occasion/i, search: 'Casual', fallbacks: ['Everyday'] },
+          { match: /material/i, search: 'Cotton', fallbacks: ['Polyester'] },
+          { match: /source/i, search: 'Thrift', fallbacks: ['Vintage', 'Retail'] },
+          { match: /age/i, search: 'Vintage', fallbacks: ['Modern'] },
+          { match: /style/i, search: 'Casual', fallbacks: ['Streetwear'] },
+          { match: /body[-_]?fit/i, search: 'Regular', fallbacks: ['Relaxed'] },
+          { match: /city/i, search: 'Los Angeles', fallbacks: ['New York'] },
+        ]
 
         for (const field of unfilledFields) {
           if (!field.inputId) {
@@ -886,9 +950,14 @@ export async function createDepopListingBrowser(
           }
 
           try {
-            const defaults = FIELD_DEFAULTS[field.labelText] ?? { search: '' }
-            if (!defaults.search) {
-              console.warn(`[Depop] No default value for "${field.labelText}" — skipping`)
+            // Label lookup first, then ID-based fallback for unknown labels
+            let defaults = FIELD_DEFAULTS[field.labelText] as { search: string; fallbacks?: string[] } | undefined
+            if (!defaults) {
+              const byId = ID_DEFAULTS.find((d) => d.match.test(field.inputId!))
+              if (byId) defaults = { search: byId.search, fallbacks: byId.fallbacks }
+            }
+            if (!defaults || !defaults.search) {
+              console.warn(`[Depop] No default value for "${field.labelText}" (id=${field.inputId}) — skipping`)
               continue
             }
             await typeToSelectCombobox(field.inputId, field.labelText, defaults.search, defaults.fallbacks)
