@@ -52,22 +52,52 @@ async function runJobs() {
       const remaining = Math.max(0, dailyPublishLimit - publishedToday)
 
       if (remaining > 0) {
-        const drafts = await prisma.listing.findMany({
-          where: { status: 'DRAFT' },
-          orderBy: { createdAt: 'asc' },
-          take: remaining,
-        })
-
-        let published = 0
-        for (const draft of drafts) {
-          try {
-            const result = await publishListing(draft.id, ['DEPOP'])
-            if (Object.values(result).some((r) => r.success)) published++
-          } catch (err) {
-            console.error(`[AutoPublish] Failed for ${draft.id}:`, err)
+        // Pre-flight: verify Depop token before doing anything (drafts query +
+        // Playwright browser launch are expensive). If token is bad, every
+        // publish will fail — skip with a loud log instead of silently failing.
+        let depopTokenOk = true
+        try {
+          const { getValidDepopToken } = await import('@/lib/depop/auth')
+          const token = await getValidDepopToken()
+          if (!token) {
+            console.warn('[AutoPublish] Depop not connected — skipping all publishes. Reconnect in Settings → Connected Accounts.')
+            results.push('autoPublish(skipped:no-token)')
+            depopTokenOk = false
           }
+        } catch (e) {
+          console.warn('[AutoPublish] Depop token unusable — skipping all publishes:', e instanceof Error ? e.message : e)
+          results.push('autoPublish(skipped:bad-token)')
+          depopTokenOk = false
         }
-        results.push(`autoPublish(${published}/${drafts.length})`)
+
+        if (depopTokenOk) {
+          const drafts = await prisma.listing.findMany({
+            where: { status: 'DRAFT' },
+            orderBy: { createdAt: 'asc' },
+            take: remaining,
+          })
+
+          let published = 0
+          for (const draft of drafts) {
+            try {
+              const result = await publishListing(draft.id, ['DEPOP'])
+              if (Object.values(result).some((r) => r.success)) {
+                published++
+              } else {
+                // publishListing catches per-platform errors and returns them in the
+                // result object. Surface those so silent failures stop happening.
+                for (const [platform, r] of Object.entries(result)) {
+                  if (!r.success) {
+                    console.error(`[AutoPublish] ${platform} publish failed for ${draft.id} (${draft.title}): ${r.error ?? 'unknown error'}`)
+                  }
+                }
+              }
+            } catch (err) {
+              console.error(`[AutoPublish] Failed for ${draft.id} (${draft.title}):`, err instanceof Error ? err.message : err)
+            }
+          }
+          results.push(`autoPublish(${published}/${drafts.length})`)
+        }
       } else {
         results.push(`autoPublish(daily limit reached: ${publishedToday}/${dailyPublishLimit})`)
       }
