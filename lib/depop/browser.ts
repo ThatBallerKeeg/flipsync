@@ -813,68 +813,98 @@ export async function createDepopListingBrowser(
       }
     }
 
-    // ─── 8. Ensure USPS shipping is selected ─────────────────────────────────
+    // ─── 8. Click USPS shipping radio if it exists (legacy forms only) ───────
     const uspsRadio = page.locator('[data-testid="usps__shipping__input"]')
     if (await uspsRadio.count() > 0) {
       await uspsRadio.check().catch(() => null)
       await page.waitForTimeout(600)
+      console.log('[Depop] Legacy USPS radio checked')
+    }
 
-      // ─── 8b. Select Package size (required for USPS) ─────────────────────
-      try {
-        const pkgInputId = await findComboboxByLabel(/package\s*size/i)
-        if (pkgInputId) {
-          await typeToSelectCombobox(pkgInputId, 'Package size', 'Small', ['Medium'])
-        } else {
-          console.warn('[Depop] Package size field not found')
-        }
-      } catch (e) {
-        console.warn('[Depop] Package size selection failed:', e)
+    // ─── 8b. Select Package size IF it's still a real Package size field ─────
+    // Depop appears to have replaced the Package size combobox with shippingMethods
+    // but kept the visible label "Package size". Skip if the input we'd target is
+    // actually #shippingMethods-input — that's handled in step 8b2 below.
+    try {
+      const pkgInputId = await findComboboxByLabel(/package\s*size/i)
+      if (pkgInputId && pkgInputId !== 'shippingMethods-input') {
+        await typeToSelectCombobox(pkgInputId, 'Package size', 'Small', ['Medium'])
+      } else if (pkgInputId === 'shippingMethods-input') {
+        console.log('[Depop] "Package size" label points to shippingMethods — step 8b2 will handle it')
+      } else {
+        console.log('[Depop] Package size field not present')
       }
+    } catch (e) {
+      console.warn('[Depop] Package size selection failed:', e)
+    }
 
-      // ─── 8b2. Select Shipping method (new Depop requirement) ──────────────
-      // Depop now requires picking a specific carrier service. The exact
-      // option labels vary by account/region, so we just click whatever first
-      // option appears — by this point USPS radio is already selected so the
-      // dropdown is filtered to USPS services only.
-      try {
+    // ─── 8b2. Select Shipping method (REQUIRED; runs unconditionally) ────────
+    // Depop's new form requires picking a carrier service from a combobox.
+    // The options are USPS service tiers (Ground Advantage / Priority / etc.)
+    // and don't autocomplete by typing — we just open the dropdown and click
+    // whatever the first option is.
+    try {
+      await page.locator('textarea[name="description"]').click().catch(() => null)
+      await page.waitForTimeout(300)
+
+      const shipInput = page.locator('#shippingMethods-input').first()
+      if (await shipInput.count() > 0) {
+        await shipInput.scrollIntoViewIfNeeded().catch(() => null)
+        await shipInput.click()
+        await page.waitForTimeout(1000)
+
+        const ariaControls = await shipInput.getAttribute('aria-controls').catch(() => null)
+        let clicked = false
+
+        // Strategy A: click first <[role=option]> inside the controlled listbox
+        if (ariaControls) {
+          const firstOpt = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
+          if (await firstOpt.count() > 0) {
+            const text = await firstOpt.textContent().catch(() => '')
+            await firstOpt.click({ timeout: 3000 }).catch(() => null)
+            console.log(`[Depop] Shipping method: clicked first option "${text?.trim()}"`)
+            clicked = true
+            await page.waitForTimeout(600)
+          }
+        }
+        // Strategy B: page.evaluate fallback for any visible listbox's first option
+        if (!clicked) {
+          const evalClicked = await page.evaluate(() => {
+            for (const lb of document.querySelectorAll('[role="listbox"]')) {
+              const s = getComputedStyle(lb as HTMLElement)
+              if (s.display === 'none' || s.visibility === 'hidden') continue
+              const opt = lb.querySelector('[role="option"]')
+              if (opt) { (opt as HTMLElement).click(); return (opt as HTMLElement).textContent?.trim() ?? 'clicked' }
+            }
+            return null
+          })
+          if (evalClicked) {
+            console.log(`[Depop] Shipping method: clicked via evaluate "${evalClicked}"`)
+            clicked = true
+            await page.waitForTimeout(600)
+          }
+        }
+        // Strategy C: keyboard fallback
+        if (!clicked) {
+          await page.keyboard.press('ArrowDown')
+          await page.waitForTimeout(200)
+          await page.keyboard.press('Enter')
+          await page.waitForTimeout(500)
+          console.log('[Depop] Shipping method: used keyboard fallback')
+        }
+
+        // Verify it actually got set
+        const verifyVal = await shipInput.inputValue().catch(() => '')
+        console.log(`[Depop] Shipping method final value: "${verifyVal}"`)
+
+        // Click away to close dropdown
         await page.locator('textarea[name="description"]').click().catch(() => null)
         await page.waitForTimeout(300)
-
-        const shipInput = page.locator('#shippingMethods-input').first()
-        if (await shipInput.count() > 0) {
-          await shipInput.scrollIntoViewIfNeeded().catch(() => null)
-          await shipInput.click()
-          await page.waitForTimeout(800)
-
-          const ariaControls = await shipInput.getAttribute('aria-controls').catch(() => null)
-          let clicked = false
-          if (ariaControls) {
-            const firstOpt = page.locator(`[id="${ariaControls}"] [role="option"]`).first()
-            if (await firstOpt.count() > 0) {
-              const text = await firstOpt.textContent().catch(() => '')
-              await firstOpt.click({ timeout: 3000 }).catch(() => null)
-              console.log(`[Depop] Shipping method: clicked first option "${text?.trim()}"`)
-              clicked = true
-              await page.waitForTimeout(500)
-            }
-          }
-          if (!clicked) {
-            // Keyboard fallback
-            await page.keyboard.press('ArrowDown')
-            await page.waitForTimeout(200)
-            await page.keyboard.press('Enter')
-            await page.waitForTimeout(500)
-            console.log('[Depop] Shipping method: used keyboard fallback')
-          }
-          // Click away to close any open dropdown
-          await page.locator('textarea[name="description"]').click().catch(() => null)
-          await page.waitForTimeout(300)
-        } else {
-          console.log('[Depop] shippingMethods-input not present (legacy form?)')
-        }
-      } catch (e) {
-        console.warn('[Depop] Shipping method selection failed:', e)
+      } else {
+        console.log('[Depop] shippingMethods-input not present')
       }
+    } catch (e) {
+      console.warn('[Depop] Shipping method selection failed:', e)
     }
 
     // Health check after shipping
@@ -952,6 +982,43 @@ export async function createDepopListingBrowser(
         for (const field of unfilledFields) {
           if (!field.inputId) {
             console.warn(`[Depop] Could not fill "${field.labelText}" — no input ID`)
+            continue
+          }
+
+          // Special case: the shipping methods combobox does NOT support type-to-filter.
+          // Open it and click the first option. (Also covers the legacy "Package size"
+          // label that now actually points at shippingMethods-input.)
+          if (field.inputId === 'shippingMethods-input') {
+            try {
+              const escapedId = field.inputId.replace(/([^\w-])/g, '\\$1')
+              const shipInput = page.locator(`#${escapedId}`).first()
+              await shipInput.scrollIntoViewIfNeeded().catch(() => null)
+              await shipInput.click()
+              await page.waitForTimeout(800)
+              const ac = await shipInput.getAttribute('aria-controls').catch(() => null)
+              let clicked = false
+              if (ac) {
+                const firstOpt = page.locator(`[id="${ac}"] [role="option"]`).first()
+                if (await firstOpt.count() > 0) {
+                  const text = await firstOpt.textContent().catch(() => '')
+                  await firstOpt.click({ timeout: 3000 }).catch(() => null)
+                  console.log(`[Depop] Shipping method (auto-fill): clicked first option "${text?.trim()}"`)
+                  clicked = true
+                  await page.waitForTimeout(500)
+                }
+              }
+              if (!clicked) {
+                await page.keyboard.press('ArrowDown')
+                await page.waitForTimeout(200)
+                await page.keyboard.press('Enter')
+                await page.waitForTimeout(500)
+                console.log('[Depop] Shipping method (auto-fill): keyboard fallback')
+              }
+              await page.locator('textarea[name="description"]').click().catch(() => null)
+              await page.waitForTimeout(300)
+            } catch (e) {
+              console.warn('[Depop] Shipping method auto-fill failed:', e instanceof Error ? e.message : e)
+            }
             continue
           }
 
