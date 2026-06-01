@@ -25,10 +25,29 @@ import os from 'os'
 let browser: Browser | null = null
 
 async function getBrowser(): Promise<Browser> {
-  if (!browser || !browser.isConnected()) {
-    browser = await chromium.launch({ headless: true })
+  if (browser && browser.isConnected()) return browser
+  // Clean up a half-dead instance before relaunching so we don't leak resources.
+  if (browser) {
+    await browser.close().catch(() => {})
+    browser = null
   }
+  browser = await chromium.launch({
+    headless: true,
+    // Hard timeout on launch so a borked Chromium binary can't hang the worker.
+    timeout: 30000,
+  })
   return browser
+}
+
+/**
+ * Force-close the cached browser. Use after a fatal/suspected-corrupt run so
+ * the next createDepopListingBrowser() gets a fresh Chromium process.
+ */
+async function recycleBrowser(): Promise<void> {
+  if (browser) {
+    await browser.close().catch(() => {})
+    browser = null
+  }
 }
 
 const CONDITION_MAP: Record<string, string> = {
@@ -37,6 +56,55 @@ const CONDITION_MAP: Record<string, string> = {
   good: 'Good',
   fair: 'Fair',
   poor: 'Poor',
+}
+
+/**
+ * Download a URL to a file with a hard timeout. Rejects on:
+ *   - HTTP 4xx/5xx
+ *   - Network error
+ *   - No data received within `timeoutMs`
+ *
+ * Without an explicit timeout, http.get hangs indefinitely if the server
+ * accepts the connection but never sends data — which happens occasionally
+ * with overloaded CDNs and would block a whole listing creation.
+ */
+async function downloadWithTimeout(url: string, destPath: string, timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const file = fs.createWriteStream(destPath)
+    const client = url.startsWith('https://') ? https : http
+
+    let settled = false
+    const finish = (err?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      file.close(() => {
+        if (err) {
+          fs.unlink(destPath, () => {})
+          reject(err)
+        } else {
+          resolve()
+        }
+      })
+    }
+
+    const timer = setTimeout(() => {
+      finish(new Error(`Download timed out after ${timeoutMs}ms: ${url}`))
+    }, timeoutMs)
+
+    const req = client.get(url, (res) => {
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        finish(new Error(`HTTP ${res.statusCode} fetching ${url}`))
+        res.resume()  // drain so the socket can be reused
+        return
+      }
+      res.pipe(file)
+      file.on('finish', () => finish())
+      file.on('error', finish)
+      res.on('error', finish)
+    })
+    req.on('error', finish)
+  })
 }
 
 /**
@@ -68,6 +136,14 @@ export async function createDepopListingBrowser(
   const token = await getValidDepopToken()
   if (!token) throw new Error('Depop not connected — please connect your account in Settings.')
 
+  // Validate upfront — these throw clear errors instead of mysterious Depop bounces
+  if (!Array.isArray(listing.photos) || listing.photos.length === 0) {
+    throw new Error('Listing has no photos — Depop requires at least one.')
+  }
+  if (!listing.title?.trim()) {
+    throw new Error('Listing has no title.')
+  }
+
   // Track temp files for cleanup (must be declared before try/finally)
   const tempFiles: string[] = []
 
@@ -75,20 +151,29 @@ export async function createDepopListingBrowser(
 
   // Try to restore saved browser session (preserves refreshed tokens)
   const { prisma } = await import('@/lib/db/client')
-  let savedState: string | null = null
+  let parsedState: object | null = null
   try {
     const row = await prisma.appSettings.findUnique({ where: { key: 'depopBrowserState' } })
-    savedState = row?.value ?? null
-  } catch { /* no saved state */ }
+    if (row?.value) {
+      try {
+        parsedState = JSON.parse(row.value)
+      } catch (e) {
+        // Corrupt JSON in DB — discard and proceed with a fresh context.
+        // Also delete the row so future runs don't keep hitting this.
+        console.warn('[Depop] depopBrowserState JSON corrupt — discarding and starting fresh:', e instanceof Error ? e.message : e)
+        await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+      }
+    }
+  } catch { /* DB read failed — proceed with no saved state */ }
 
-  const ctx = savedState
-    ? await b.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-        storageState: JSON.parse(savedState),
-      })
-    : await b.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-      })
+  const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
+  // Playwright's storageState parameter is typed strictly; we trust the JSON
+  // we wrote ourselves but use a runtime guard above (try/catch on JSON.parse).
+  type StorageState = Parameters<typeof b.newContext>[0] & { storageState?: unknown }
+  const ctxOpts: StorageState = parsedState
+    ? { userAgent, storageState: parsedState as never }
+    : { userAgent }
+  const ctx = await b.newContext(ctxOpts)
 
   // Always ensure the access_token cookie is set (in case state didn't have it)
   await ctx.addCookies([
@@ -162,6 +247,15 @@ export async function createDepopListingBrowser(
         `inputs=${inputCount} fileInputs=${fileInputCount} body="${bodySnippet.slice(0, 300)}"`
       )
       await page.screenshot({ path: '/tmp/depop-no-file-input.png' }).catch(() => null)
+
+      // Likely causes: stale browser state OR Depop throttling. Throw away the
+      // saved state AND recycle the Chromium instance so the next attempt
+      // starts from a completely clean slate. The scheduler's consecutiveFailures
+      // counter will then circuit-break the run if it keeps failing.
+      console.warn('[Depop] Clearing saved browser state + recycling Chromium for next attempt')
+      await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+      await ctx.close().catch(() => {})
+      await recycleBrowser()
       throw e
     }
 
@@ -187,42 +281,33 @@ export async function createDepopListingBrowser(
         const fullUrl = `http://localhost:${port}${imgUrl}`
         try {
           const tmpPath = path.join(os.tmpdir(), `depop-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`)
-          await new Promise<void>((resolve, reject) => {
-            const file = fs.createWriteStream(tmpPath)
-            http.get(fullUrl, (res) => {
-              if (res.statusCode && res.statusCode >= 400) {
-                reject(new Error(`Local photo fetch failed: ${res.statusCode} ${fullUrl}`))
-                return
-              }
-              res.pipe(file)
-              file.on('finish', () => { file.close(); resolve() })
-            }).on('error', reject)
-          })
+          await downloadWithTimeout(fullUrl, tmpPath, 20000)
           localPaths.push(tmpPath)
           tempFiles.push(tmpPath)
           console.log(`[Depop] Downloaded local photo: ${imgUrl}`)
         } catch (e) {
-          console.warn('[Depop] Failed to download local photo:', imgUrl, e)
+          console.warn('[Depop] Failed to download local photo:', imgUrl, e instanceof Error ? e.message : e)
         }
       } else if (imgUrl.startsWith('http://') || imgUrl.startsWith('https://')) {
         // Download remote URL to a temp file
         try {
           const ext = imgUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
           const tmpPath = path.join(os.tmpdir(), `depop-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
-          await new Promise<void>((resolve, reject) => {
-            const file = fs.createWriteStream(tmpPath)
-            const client = imgUrl.startsWith('https://') ? https : http
-            client.get(imgUrl, (res) => {
-              res.pipe(file)
-              file.on('finish', () => { file.close(); resolve() })
-            }).on('error', reject)
-          })
+          await downloadWithTimeout(imgUrl, tmpPath, 30000)
           localPaths.push(tmpPath)
           tempFiles.push(tmpPath)
         } catch (e) {
-          console.warn('[Depop] Failed to download photo:', imgUrl, e)
+          console.warn('[Depop] Failed to download photo:', imgUrl, e instanceof Error ? e.message : e)
         }
       }
+    }
+
+    // Fail fast if we couldn't get ANY photos — Depop requires at least one.
+    if (localPaths.length === 0) {
+      throw new Error(
+        `No photos available to upload (had ${photoUrls.length} URLs but all downloads failed). ` +
+        `Check the photo URLs are reachable.`
+      )
     }
 
     // Track all network calls during photo upload for diagnostics
@@ -268,7 +353,21 @@ export async function createDepopListingBrowser(
 
     // ─── 2. Fill description ──────────────────────────────────────────────────
     const rawDesc = listing.depopDescription ?? listing.description ?? ''
-    const desc = sanitizeDepopDescription(rawDesc)
+    let desc = sanitizeDepopDescription(rawDesc)
+    // Depop caps descriptions at 1000 chars. Trim safely on a word boundary
+    // (keeps hashtags intact at the end if possible).
+    const DEPOP_DESC_LIMIT = 1000
+    if (desc.length > DEPOP_DESC_LIMIT) {
+      const truncated = desc.slice(0, DEPOP_DESC_LIMIT - 1)
+      const lastSpace = truncated.lastIndexOf(' ')
+      desc = lastSpace > DEPOP_DESC_LIMIT * 0.8 ? truncated.slice(0, lastSpace) : truncated
+      console.warn(`[Depop] Description truncated ${rawDesc.length} → ${desc.length} chars (Depop limit ${DEPOP_DESC_LIMIT})`)
+    }
+    if (!desc.trim()) {
+      // Empty descriptions cause Depop to reject the listing.
+      desc = listing.title || 'Item'
+      console.warn('[Depop] Description was empty — using title as fallback')
+    }
     console.log(`[Depop] Filling description (${desc.length} chars): "${desc.slice(0, 80)}..."`)
     try {
       await page.fill('textarea[name="description"]', desc)
@@ -286,7 +385,13 @@ export async function createDepopListingBrowser(
     }
 
     // ─── 3. Fill price ────────────────────────────────────────────────────────
-    const priceStr = String(listing.price ?? 0)
+    // Validate price — Depop rejects 0 or negative. Floor at $1 so the listing
+    // still goes up; user can edit it after.
+    const safePrice = Math.max(1, Math.round(listing.price ?? 0))
+    if (safePrice !== listing.price) {
+      console.warn(`[Depop] Price clamped: ${listing.price} → ${safePrice}`)
+    }
+    const priceStr = String(safePrice)
     console.log(`[Depop] Filling price: ${priceStr}`)
     try {
       const priceInput = page.locator('[data-testid="priceAmount__input"]')

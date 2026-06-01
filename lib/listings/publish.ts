@@ -127,13 +127,28 @@ export async function relistListing(
 
       const ext = downloadUrl.split('.').pop()?.split('?')[0] ?? 'jpg'
       const tmpPath = path.join(os.tmpdir(), `relist-photo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
+      const TIMEOUT_MS = 30000
       await new Promise<void>((resolve, reject) => {
         const file = fs.createWriteStream(tmpPath)
         const client = downloadUrl.startsWith('https://') ? https : http
+        let settled = false
+        const finish = (err?: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          file.close(() => err ? reject(err) : resolve())
+        }
+        const timer = setTimeout(() => finish(new Error(`Download timed out: ${downloadUrl}`)), TIMEOUT_MS)
         client.get(downloadUrl, (res) => {
+          if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+            finish(new Error(`HTTP ${res.statusCode} fetching ${downloadUrl}`))
+            res.resume()
+            return
+          }
           res.pipe(file)
-          file.on('finish', () => { file.close(); resolve() })
-        }).on('error', reject)
+          file.on('finish', () => finish())
+          file.on('error', finish)
+        }).on('error', finish)
       })
       tempPhotos.push(tmpPath)
     }
