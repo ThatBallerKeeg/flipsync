@@ -888,20 +888,26 @@ export async function createDepopListingBrowser(
       await page.locator('textarea[name="description"]').click().catch(() => null)
       await page.waitForTimeout(300)
 
-      // Find all unfilled combobox inputs and their IDs
+      // Find all unfilled combobox inputs and their IDs.
+      // Filter by INPUT ID (deterministic) rather than label text (fragile —
+      // nested label HTML can include words like "package" from sibling fields
+      // and accidentally skip e.g. the shipping methods field).
       const unfilledFields = await page.evaluate(() => {
         const results: { labelText: string; inputId: string | null }[] = []
         const inputs = Array.from(document.querySelectorAll('input[role="combobox"], input[aria-haspopup="listbox"]'))
         for (const input of inputs) {
           const val = (input as HTMLInputElement).value?.trim()
-          if (!val) {
-            const label = input.closest('label') ?? document.querySelector(`label[for="${input.id}"]`)
-            const labelText = label?.textContent?.trim() ?? input.getAttribute('aria-label') ?? '(unknown)'
-            // Skip fields we already handle or that are optional
-            if (!/package|search|category/i.test(labelText)) {
-              results.push({ labelText, inputId: input.id || null })
-            }
-          }
+          if (val) continue
+
+          // Skip fields handled by dedicated earlier steps OR never autofilled
+          const id = input.id || ''
+          if (id.startsWith('searchBar__input')) continue   // Site search bar
+          if (id === 'group-input') continue                 // Category (step 3b)
+          if (/package/i.test(id)) continue                  // Package size (step 8b)
+
+          const label = input.closest('label') ?? document.querySelector(`label[for="${id}"]`)
+          const labelText = label?.textContent?.trim() ?? input.getAttribute('aria-label') ?? '(unknown)'
+          results.push({ labelText, inputId: id || null })
         }
         return results
       })
