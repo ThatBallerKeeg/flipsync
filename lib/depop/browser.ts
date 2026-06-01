@@ -31,10 +31,20 @@ async function getBrowser(): Promise<Browser> {
     await browser.close().catch(() => {})
     browser = null
   }
+  // Stealth-ish launch args. Depop sits behind Cloudflare which flags Playwright's
+  // default Chromium signature as a bot. These flags hide some of the telltale
+  // automation markers but DO NOT fully defeat enterprise bot detection.
+  // The newContext() call also injects an init script that sets navigator.webdriver = undefined.
   browser = await chromium.launch({
     headless: true,
-    // Hard timeout on launch so a borked Chromium binary can't hang the worker.
     timeout: 30000,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-site-isolation-trials',
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+    ],
   })
   return browser
 }
@@ -161,7 +171,7 @@ export async function createDepopListingBrowser(
         // Corrupt JSON in DB — discard and proceed with a fresh context.
         // Also delete the row so future runs don't keep hitting this.
         console.warn('[Depop] depopBrowserState JSON corrupt — discarding and starting fresh:', e instanceof Error ? e.message : e)
-        await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+        await prisma.appSettings.deleteMany({ where: { key: 'depopBrowserState' } }).catch(() => {})
       }
     }
   } catch { /* DB read failed — proceed with no saved state */ }
@@ -174,6 +184,41 @@ export async function createDepopListingBrowser(
     ? { userAgent, storageState: parsedState as never }
     : { userAgent }
   const ctx = await b.newContext(ctxOpts)
+
+  // Stealth init script — runs in every page BEFORE any of Depop's JS.
+  // Defeats the most common Cloudflare bot fingerprints (navigator.webdriver,
+  // missing plugins, missing chrome.runtime). Won't defeat advanced enterprise
+  // bot detection but raises the bar enough that we often clear the challenge.
+  await ctx.addInitScript(() => {
+    // Hide navigator.webdriver (the #1 tell)
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    })
+    // Fake a non-empty plugins array
+    Object.defineProperty(Navigator.prototype, 'plugins', {
+      get: () => [1, 2, 3, 4, 5].map((i) => ({ name: `Plugin ${i}`, filename: `plugin${i}.so` })),
+      configurable: true,
+    })
+    // Fake a non-empty languages array
+    Object.defineProperty(Navigator.prototype, 'languages', {
+      get: () => ['en-US', 'en'],
+      configurable: true,
+    })
+    // Fake chrome.runtime existing (real Chrome has this, headless doesn't)
+    if (!('chrome' in window)) {
+      const w = window as Window & { chrome?: { runtime?: object } }
+      w.chrome = { runtime: {} }
+    }
+    // Fake the permissions API behaviour Chrome shows for notifications
+    const originalQuery = window.navigator.permissions?.query
+    if (originalQuery) {
+      window.navigator.permissions.query = ((params: PermissionDescriptor) =>
+        params.name === 'notifications'
+          ? Promise.resolve({ state: 'prompt' } as PermissionStatus)
+          : originalQuery(params)) as typeof originalQuery
+    }
+  })
 
   // Always ensure the access_token cookie is set (in case state didn't have it)
   await ctx.addCookies([
@@ -219,6 +264,34 @@ export async function createDepopListingBrowser(
       }
     }
 
+    // ─── INSTANT BLOCK DETECTION ─────────────────────────────────────────────
+    // Cloudflare's challenge page has title "Just a moment..." with a body
+    // containing "Checking if the connection is secure". Depop's hard ban is
+    // title "Forbidden - Depop" with "403 Forbidden". In both cases, retrying
+    // immediately just escalates the block — fail fast and mark a cooldown so
+    // the scheduler stops trying for 12 hours.
+    const pageTitle = await page.title().catch(() => '')
+    if (
+      /just a moment|checking your browser|attention required|cloudflare/i.test(pageTitle) ||
+      /forbidden/i.test(pageTitle)
+    ) {
+      const bodyTxt = await page.locator('body').innerText().catch(() => '')
+      console.error(`[Depop] BLOCKED by Cloudflare/Depop. title="${pageTitle}" body="${bodyTxt.slice(0, 200)}"`)
+      // Mark a 12-hour cooldown so the scheduler skips the run instead of
+      // hammering the endpoint and getting our IP further entrenched on
+      // Cloudflare's block list.
+      const cooldownUntil = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString()
+      await prisma.appSettings.upsert({
+        where: { key: 'depopBlockedUntil' },
+        create: { key: 'depopBlockedUntil', value: cooldownUntil },
+        update: { value: cooldownUntil },
+      }).catch(() => {})
+      throw new Error(
+        `Depop blocked the request (${pageTitle}). The Railway IP appears to be on Cloudflare's bot list. ` +
+        `Auto-publish/relist paused for 12h. To work around: publish manually from the dashboard, or run FlipSync from a residential IP.`
+      )
+    }
+
     // Wait for the file input — Depop periodically renames data-testid attributes,
     // so try the known ID first then fall back to generic file inputs.
     const FILE_INPUT_SELECTOR = [
@@ -253,7 +326,7 @@ export async function createDepopListingBrowser(
       // starts from a completely clean slate. The scheduler's consecutiveFailures
       // counter will then circuit-break the run if it keeps failing.
       console.warn('[Depop] Clearing saved browser state + recycling Chromium for next attempt')
-      await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+      await prisma.appSettings.deleteMany({ where: { key: 'depopBrowserState' } }).catch(() => {})
       await ctx.close().catch(() => {})
       await recycleBrowser()
       throw e
@@ -334,7 +407,7 @@ export async function createDepopListingBrowser(
           console.log(`[Depop] Photo ${i + 1} upload: ${status} ${resp.url()}`)
           if (status === 401) {
             // Token expired — clear stale browser state so next attempt starts fresh
-            await prisma.appSettings.delete({ where: { key: 'depopBrowserState' } }).catch(() => {})
+            await prisma.appSettings.deleteMany({ where: { key: 'depopBrowserState' } }).catch(() => {})
             throw new Error('Depop session expired (401) — please reconnect your Depop account in Settings → Connected Accounts.')
           }
         } else {

@@ -52,22 +52,36 @@ async function runJobs() {
       const remaining = Math.max(0, dailyPublishLimit - publishedToday)
 
       if (remaining > 0) {
+        // Pre-flight: check Cloudflare/Depop cooldown set by browser.ts when
+        // it last detected a block. Avoids hammering the endpoint while the
+        // IP is on their bot list.
+        const blockedUntilRow = await prisma.appSettings.findUnique({ where: { key: 'depopBlockedUntil' } })
+        const blockedUntil = blockedUntilRow ? new Date(blockedUntilRow.value) : null
+        const isBlocked = blockedUntil !== null && blockedUntil.getTime() > Date.now()
+        if (isBlocked) {
+          const hoursLeft = Math.ceil((blockedUntil!.getTime() - Date.now()) / (60 * 60 * 1000))
+          console.warn(`[AutoPublish] Depop block cooldown active for ${hoursLeft}h more — skipping. Publish manually from dashboard if urgent.`)
+          results.push(`autoPublish(skipped:blocked-${hoursLeft}h)`)
+        }
+
         // Pre-flight: verify Depop token before doing anything (drafts query +
         // Playwright browser launch are expensive). If token is bad, every
         // publish will fail — skip with a loud log instead of silently failing.
-        let depopTokenOk = true
-        try {
-          const { getValidDepopToken } = await import('@/lib/depop/auth')
-          const token = await getValidDepopToken()
-          if (!token) {
-            console.warn('[AutoPublish] Depop not connected — skipping all publishes. Reconnect in Settings → Connected Accounts.')
-            results.push('autoPublish(skipped:no-token)')
+        let depopTokenOk = !isBlocked
+        if (!isBlocked) {
+          try {
+            const { getValidDepopToken } = await import('@/lib/depop/auth')
+            const token = await getValidDepopToken()
+            if (!token) {
+              console.warn('[AutoPublish] Depop not connected — skipping all publishes. Reconnect in Settings → Connected Accounts.')
+              results.push('autoPublish(skipped:no-token)')
+              depopTokenOk = false
+            }
+          } catch (e) {
+            console.warn('[AutoPublish] Depop token unusable — skipping all publishes:', e instanceof Error ? e.message : e)
+            results.push('autoPublish(skipped:bad-token)')
             depopTokenOk = false
           }
-        } catch (e) {
-          console.warn('[AutoPublish] Depop token unusable — skipping all publishes:', e instanceof Error ? e.message : e)
-          results.push('autoPublish(skipped:bad-token)')
-          depopTokenOk = false
         }
 
         if (depopTokenOk) {
@@ -132,23 +146,35 @@ async function runJobs() {
       cutoff.setDate(cutoff.getDate() - afterDays)
       console.log(`[AutoRelist] Config: afterDays=${afterDays}, perDay=${perDay}, cutoff=${cutoff.toISOString()}`)
 
+      // Pre-flight: Cloudflare cooldown (same source as auto-publish above)
+      const relistBlockedRow = await prisma.appSettings.findUnique({ where: { key: 'depopBlockedUntil' } })
+      const relistBlockedUntil = relistBlockedRow ? new Date(relistBlockedRow.value) : null
+      const relistIsBlocked = relistBlockedUntil !== null && relistBlockedUntil.getTime() > Date.now()
+      if (relistIsBlocked) {
+        const hoursLeft = Math.ceil((relistBlockedUntil!.getTime() - Date.now()) / (60 * 60 * 1000))
+        console.warn(`[AutoRelist] Depop block cooldown active for ${hoursLeft}h more — skipping.`)
+        results.push(`autoRelist(skipped:blocked-${hoursLeft}h)`)
+      }
+
       // Pre-flight: verify the Depop token is decryptable BEFORE doing any expensive
       // work (photo downloads, Claude description rewrites). If the token is bad,
       // every relist will fail anyway — short-circuit the relist block (but keep
       // the PriceDrop logic that runs after it).
-      let depopTokenOk = true
-      try {
-        const { getValidDepopToken } = await import('@/lib/depop/auth')
-        const token = await getValidDepopToken()
-        if (!token) {
-          console.warn('[AutoRelist] Depop not connected — skipping all relists. Reconnect in Settings → Connected Accounts.')
-          results.push('autoRelist(skipped:no-token)')
+      let depopTokenOk = !relistIsBlocked
+      if (!relistIsBlocked) {
+        try {
+          const { getValidDepopToken } = await import('@/lib/depop/auth')
+          const token = await getValidDepopToken()
+          if (!token) {
+            console.warn('[AutoRelist] Depop not connected — skipping all relists. Reconnect in Settings → Connected Accounts.')
+            results.push('autoRelist(skipped:no-token)')
+            depopTokenOk = false
+          }
+        } catch (e) {
+          console.warn('[AutoRelist] Depop token unusable — skipping all relists:', e instanceof Error ? e.message : e)
+          results.push('autoRelist(skipped:bad-token)')
           depopTokenOk = false
         }
-      } catch (e) {
-        console.warn('[AutoRelist] Depop token unusable — skipping all relists:', e instanceof Error ? e.message : e)
-        results.push('autoRelist(skipped:bad-token)')
-        depopTokenOk = false
       }
       if (!depopTokenOk) {
         // jump past the relist block
