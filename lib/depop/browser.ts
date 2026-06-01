@@ -143,7 +143,27 @@ export async function createDepopListingBrowser(
       'input[type="file"]',
     ].join(', ')
 
-    await page.waitForSelector(FILE_INPUT_SELECTOR, { timeout: 15000 })
+    // CRITICAL: file inputs on Depop are display:none (the styled "Add a photo"
+    // button triggers them via JS). The default state:'visible' would never
+    // resolve — use state:'attached' so we only wait for the element to exist
+    // in the DOM. setInputFiles() works on hidden inputs.
+    try {
+      await page.waitForSelector(FILE_INPUT_SELECTOR, { timeout: 20000, state: 'attached' })
+    } catch (e) {
+      // Diagnostic dump — if even an attached file input isn't found, the page
+      // is probably stuck on something else (login redirect, captcha, throttle).
+      const url = page.url()
+      const title = await page.title().catch(() => '')
+      const bodySnippet = await page.locator('body').innerText().catch(() => '')
+      const inputCount = await page.locator('input').count().catch(() => 0)
+      const fileInputCount = await page.locator('input[type="file"]').count().catch(() => 0)
+      console.error(
+        `[Depop] File input not found within 20s. url=${url} title="${title}" ` +
+        `inputs=${inputCount} fileInputs=${fileInputCount} body="${bodySnippet.slice(0, 300)}"`
+      )
+      await page.screenshot({ path: '/tmp/depop-no-file-input.png' }).catch(() => null)
+      throw e
+    }
 
     // ─── 1. Upload photos ─────────────────────────────────────────────────────
     const photoUrls = listing.photos.slice(0, 4)

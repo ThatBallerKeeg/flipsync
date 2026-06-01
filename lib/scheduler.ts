@@ -78,14 +78,29 @@ async function runJobs() {
           })
 
           let published = 0
-          for (const draft of drafts) {
+          let consecutiveFailures = 0
+          for (let i = 0; i < drafts.length; i++) {
+            const draft = drafts[i]
+            // Gentle pacing: 45s between attempts so Depop doesn't rate-limit /
+            // flag the account. Auto-relist already uses 30s; publish creates a
+            // brand new listing which is more sensitive.
+            if (i > 0) {
+              console.log('[AutoPublish] Waiting 45s before next publish...')
+              await new Promise((r) => setTimeout(r, 45000))
+            }
+            // Bail out if multiple back-to-back failures — likely Depop is
+            // throttling us. Try again next hour rather than burning all 5 slots.
+            if (consecutiveFailures >= 2) {
+              console.warn(`[AutoPublish] Aborting run after ${consecutiveFailures} consecutive failures — will retry next hour`)
+              break
+            }
             try {
               const result = await publishListing(draft.id, ['DEPOP'])
               if (Object.values(result).some((r) => r.success)) {
                 published++
+                consecutiveFailures = 0
               } else {
-                // publishListing catches per-platform errors and returns them in the
-                // result object. Surface those so silent failures stop happening.
+                consecutiveFailures++
                 for (const [platform, r] of Object.entries(result)) {
                   if (!r.success) {
                     console.error(`[AutoPublish] ${platform} publish failed for ${draft.id} (${draft.title}): ${r.error ?? 'unknown error'}`)
@@ -93,6 +108,7 @@ async function runJobs() {
                 }
               }
             } catch (err) {
+              consecutiveFailures++
               console.error(`[AutoPublish] Failed for ${draft.id} (${draft.title}):`, err instanceof Error ? err.message : err)
             }
           }
